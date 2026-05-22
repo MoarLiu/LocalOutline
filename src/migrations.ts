@@ -56,6 +56,8 @@ const normalizeNode = (
     icon: typeof rawNode.icon === "string" ? rawNode.icon : undefined,
     imageName:
       typeof rawNode.imageName === "string" ? rawNode.imageName : undefined,
+    imageAlt:
+      typeof rawNode.imageAlt === "string" ? rawNode.imageAlt : undefined,
     table: normalizeTable(rawNode.table),
     children: [],
   };
@@ -74,6 +76,18 @@ export const migrateDocument = (
   if (!isRecord(rawDocument)) throw new Error("导入文件不是有效文档");
 
   const now = new Date().toISOString();
+  const updatedAt = textOr(rawDocument.updatedAt, now);
+  const markdownSource =
+    typeof rawDocument.markdownSource === "string"
+      ? rawDocument.markdownSource.replace(/\r\n?/g, "\n")
+      : undefined;
+  const markdownUpdatedAt =
+    typeof rawDocument.markdownUpdatedAt === "string" &&
+    rawDocument.markdownUpdatedAt.trim()
+      ? rawDocument.markdownUpdatedAt
+      : markdownSource !== undefined
+        ? updatedAt
+        : undefined;
   const nodes = Array.isArray(rawDocument.nodes)
     ? rawDocument.nodes.map((node) => normalizeNode(node, usedIds))
     : [];
@@ -82,7 +96,9 @@ export const migrateDocument = (
     id: uniqueId(rawDocument.id, usedIds),
     title: textOr(rawDocument.title, "").trim() || "未命名文档",
     createdAt: textOr(rawDocument.createdAt, now),
-    updatedAt: textOr(rawDocument.updatedAt, now),
+    updatedAt,
+    ...(markdownSource !== undefined ? { markdownSource } : {}),
+    ...(markdownUpdatedAt !== undefined ? { markdownUpdatedAt } : {}),
     nodes: nodes.length ? nodes : [normalizeNode(null, usedIds)],
   };
 };

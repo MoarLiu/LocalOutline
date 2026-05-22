@@ -11,8 +11,11 @@ import {
   Circle,
   Clock,
   Cloud,
+  Code2,
+  Columns2,
   Copy,
   Download,
+  Eye,
   FileDown,
   FileJson,
   FileText,
@@ -26,15 +29,19 @@ import {
   Indent,
   Italic,
   LayoutList,
+  List,
+  ListChecks,
   Link2,
   ListTree,
   Maximize2,
   Moon,
   Palette,
   Pause,
+  Pencil,
   Play,
   Plus,
   Presentation,
+  Quote,
   RotateCcw,
   Search,
   Smile,
@@ -60,6 +67,7 @@ import {
   exportWorkspace,
   importDocument,
 } from "./exporters";
+import { documentToMarkdown, parseMarkdownDocument } from "./markdown";
 import { firstDocument, migrateWorkspace } from "./migrations";
 import { createStarterWorkspace } from "./sample";
 import { loadWorkspace, saveWorkspace } from "./storage";
@@ -88,6 +96,17 @@ import {
 } from "./tree";
 
 type ExportFormat = "json" | "markdown" | "opml" | "freemind" | "html";
+type AppViewMode = ViewMode | "markdown";
+type MarkdownPaneMode = "edit" | "preview" | "split";
+type MarkdownDocument = OutlineDocument & {
+  markdownSource?: string;
+  markdownUpdatedAt?: string;
+};
+type MarkdownDraft = {
+  documentId: string | null;
+  value: string;
+  dirty: boolean;
+};
 type NodeClipboard = {
   mode: "copy" | "cut";
   sourceId: string;
@@ -114,6 +133,28 @@ const collectDocumentText = (document: OutlineDocument) =>
     .map((row) => nodeText(row.node))
     .join(" ")}`.toLowerCase();
 
+const getDocumentMarkdown = (document: MarkdownDocument) =>
+  document.markdownSource ?? documentToMarkdown(document);
+
+const replaceMarkdownTitle = (source: string, title: string) => {
+  const normalized = source.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
+  const safeTitle = title.trim() || "未命名文档";
+  const lines = normalized.split("\n");
+  const titleIndex = lines.findIndex((line) => /^\s{0,3}#(?!#)\s+/.test(line));
+  if (titleIndex >= 0) {
+    lines[titleIndex] = `# ${safeTitle}`;
+    return lines.join("\n");
+  }
+  return [`# ${safeTitle}`, "", normalized].join("\n").trimEnd();
+};
+
+const clearDocumentMarkdown = (document: MarkdownDocument): MarkdownDocument => {
+  const next = { ...document };
+  delete next.markdownSource;
+  delete next.markdownUpdatedAt;
+  return next;
+};
+
 const renderNodeMarkdown = (node: OutlineNode, depth = 0): string => {
   const indent = "  ".repeat(depth);
   const checked = node.checked ? "[x] " : "";
@@ -138,6 +179,19 @@ const formatTime = (iso: string) =>
     minute: "2-digit",
   }).format(new Date(iso));
 
+const formatRecentTime = (iso: string) => {
+  const timestamp = new Date(iso).getTime();
+  if (Number.isNaN(timestamp)) return "时间未知";
+  const elapsed = Date.now() - timestamp;
+  const minute = 60 * 1000;
+  const hour = 60 * minute;
+  const day = 24 * hour;
+  if (elapsed < minute) return "刚刚编辑";
+  if (elapsed < hour) return `${Math.max(1, Math.floor(elapsed / minute))} 分钟前编辑`;
+  if (elapsed < day) return `${Math.floor(elapsed / hour)} 小时前编辑`;
+  return `编辑于 ${formatTime(iso)}`;
+};
+
 const colorOptions = [
   { value: "plain", label: "默认" },
   { value: "blue", label: "蓝" },
@@ -157,7 +211,9 @@ const nodeMenuColors = [
 function App() {
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [ready, setReady] = useState(false);
-  const [mode, setMode] = useState<ViewMode>("outline");
+  const [mode, setMode] = useState<AppViewMode>("outline");
+  const [markdownPaneMode, setMarkdownPaneMode] = useState<MarkdownPaneMode>("split");
+  const [markdownDraft, setMarkdownDraft] = useState("");
   const [search, setSearch] = useState("");
   const [activeNodeId, setActiveNodeId] = useState<string | null>(null);
   const [focusNodeId, setFocusNodeId] = useState<string | null>(null);
@@ -167,8 +223,15 @@ function App() {
   const [noticeKey, setNoticeKey] = useState(0);
   const [showConfirmDelete, setShowConfirmDelete] = useState(false);
   const [sidebarView, setSidebarView] = useState<"all" | "recent">("all");
+  const [recentTicker, setRecentTicker] = useState(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const inputRefs = useRef(new Map<string, HTMLTextAreaElement>());
+  const workspaceRef = useRef<Workspace | null>(null);
+  const modeRef = useRef<AppViewMode>("outline");
+  const activeNodeIdRef = useRef<string | null>(null);
+  const markdownDraftRef = useRef<MarkdownDraft>({ documentId: null, value: "", dirty: false });
+  const markdownParseTimerRef = useRef<number | null>(null);
+  const flushPendingEditsRef = useRef<() => Workspace | null>(() => null);
 
   const [theme, setTheme] = useState<"light" | "dark">(
     () => (localStorage.getItem("theme") as "light" | "dark") || "light"
@@ -180,17 +243,35 @@ function App() {
     setNoticeKey((k) => k + 1);
   };
 
+  const replaceWorkspace = (next: Workspace) => {
+    workspaceRef.current = next;
+    setWorkspace(next);
+    return next;
+  };
+
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
     localStorage.setItem("theme", theme);
   }, [theme]);
 
   useEffect(() => {
+    workspaceRef.current = workspace;
+  }, [workspace]);
+
+  useEffect(() => {
+    modeRef.current = mode;
+  }, [mode]);
+
+  useEffect(() => {
+    activeNodeIdRef.current = activeNodeId;
+  }, [activeNodeId]);
+
+  useEffect(() => {
     let mounted = true;
     loadWorkspace().then((stored) => {
       if (!mounted) return;
       const next = stored ?? createStarterWorkspace();
-      setWorkspace(next);
+      replaceWorkspace(next);
       setActiveNodeId(firstNodeIdInWorkspace(next));
       setReady(true);
     });
@@ -208,6 +289,14 @@ function App() {
   }, [workspace, ready]);
 
   useEffect(() => {
+    if (sidebarView !== "recent") return;
+    const handle = window.setInterval(() => {
+      setRecentTicker((value) => value + 1);
+    }, 60 * 1000);
+    return () => window.clearInterval(handle);
+  }, [sidebarView]);
+
+  useEffect(() => {
     if (!activeNodeId) return;
     const handle = window.setTimeout(() => {
       const input = inputRefs.current.get(activeNodeId);
@@ -222,13 +311,13 @@ function App() {
     return () => window.clearTimeout(handle);
   }, [activeNodeId, mode, pendingCaretFocus]);
 
-  const activeDocument = useMemo(() => {
+  const activeDocument = useMemo<MarkdownDocument | null>(() => {
     if (!workspace) return null;
     return (
       workspace.documents.find((document) => document.id === workspace.activeDocumentId) ??
       workspace.documents[0] ??
       null
-    );
+    ) as MarkdownDocument | null;
   }, [workspace]);
 
   const activeNode = useMemo(() => {
@@ -278,23 +367,30 @@ function App() {
       return matchesQuery && matchesTag;
     });
     if (sidebarView === "recent") {
-      return [...filtered].sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
+      return [...filtered]
+        .sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""))
+        .slice(0, 12);
     }
     return filtered;
-  }, [search, selectedTag, workspace, sidebarView]);
+  }, [search, selectedTag, workspace, sidebarView, recentTicker]);
 
   const commitWorkspace = (updater: (workspace: Workspace) => Workspace) => {
-    setWorkspace((current) => (current ? updater(current) : current));
+    const current = workspaceRef.current;
+    if (!current) return null;
+    return replaceWorkspace(updater(current));
   };
 
   const patchActiveDocument = (
-    updater: (document: OutlineDocument) => OutlineDocument,
+    updater: (document: MarkdownDocument) => MarkdownDocument,
+    options: { preserveMarkdown?: boolean } = {},
   ) => {
     commitWorkspace((current) => ({
       ...current,
       documents: current.documents.map((document) =>
         document.id === current.activeDocumentId
-          ? updater({ ...document, updatedAt: now() })
+          ? options.preserveMarkdown
+            ? updater({ ...(document as MarkdownDocument), updatedAt: now() })
+            : clearDocumentMarkdown(updater({ ...(document as MarkdownDocument), updatedAt: now() }))
           : document,
       ),
     }));
@@ -304,14 +400,169 @@ function App() {
     patchActiveDocument((document) => ({ ...document, nodes }));
   };
 
+  const parseMarkdownIntoDocument = (
+    document: MarkdownDocument,
+    content: string,
+  ): MarkdownDocument => {
+    const timestamp = now();
+    const parsed = parseMarkdownDocument(content, {
+      previousDocument: document,
+      documentId: document.id,
+      now: timestamp,
+    });
+    return {
+      ...document,
+      ...parsed,
+      id: document.id,
+      createdAt: document.createdAt,
+      updatedAt: timestamp,
+      markdownSource: content,
+      markdownUpdatedAt: timestamp,
+    };
+  };
+
+  const flushMarkdownDraft = () => {
+    if (markdownParseTimerRef.current) {
+      window.clearTimeout(markdownParseTimerRef.current);
+      markdownParseTimerRef.current = null;
+    }
+
+    const draft = markdownDraftRef.current;
+    if (!draft.documentId || !draft.dirty) return workspaceRef.current;
+
+    let nextDocument: MarkdownDocument | null = null;
+    try {
+      const nextWorkspace = commitWorkspace((current) => ({
+        ...current,
+        documents: current.documents.map((document) => {
+          if (document.id !== draft.documentId) return document;
+          nextDocument = parseMarkdownIntoDocument(document as MarkdownDocument, draft.value);
+          return nextDocument;
+        }),
+      }));
+
+      markdownDraftRef.current = { ...draft, dirty: false };
+      const nextNodes = nextDocument ? (nextDocument as MarkdownDocument).nodes : null;
+      if (
+        nextNodes &&
+        nextWorkspace?.activeDocumentId === draft.documentId &&
+        (!activeNodeIdRef.current || !findNode(nextNodes, activeNodeIdRef.current))
+      ) {
+        setActiveNodeId(firstNodeId(nextNodes));
+      }
+      return nextWorkspace ?? workspaceRef.current;
+    } catch (error) {
+      showNotice(error instanceof Error ? error.message : "Markdown 解析失败");
+      return workspaceRef.current;
+    }
+  };
+
+  const flushFocusedStructuredInput = () => {
+    const element = document.activeElement;
+    if (!(element instanceof HTMLTextAreaElement)) return workspaceRef.current;
+
+    const entry = Array.from(inputRefs.current.entries()).find(([, input]) => input === element);
+    if (!entry) return workspaceRef.current;
+
+    const [nodeId] = entry;
+    const current = workspaceRef.current;
+    const active = current?.documents.find((item) => item.id === current.activeDocumentId);
+    const node = active ? findNode(active.nodes, nodeId) : null;
+    if (!current || !active || !node || node.text === element.value) return current;
+
+    return commitWorkspace((workspace) => ({
+      ...workspace,
+      documents: workspace.documents.map((document) =>
+        document.id === workspace.activeDocumentId
+          ? clearDocumentMarkdown({
+              ...(document as MarkdownDocument),
+              updatedAt: now(),
+              nodes: updateNode(document.nodes, nodeId, (target) => {
+                target.text = element.value;
+              }),
+            })
+          : document,
+      ),
+    }));
+  };
+
+  const flushPendingEdits = () => {
+    flushMarkdownDraft();
+    return flushFocusedStructuredInput() ?? workspaceRef.current;
+  };
+
+  flushPendingEditsRef.current = flushPendingEdits;
+
+  const handleMarkdownDraftChange = (value: string) => {
+    if (!activeDocument) return;
+    setMarkdownDraft(value);
+    markdownDraftRef.current = {
+      documentId: activeDocument.id,
+      value,
+      dirty: true,
+    };
+
+    if (markdownParseTimerRef.current) {
+      window.clearTimeout(markdownParseTimerRef.current);
+    }
+    markdownParseTimerRef.current = window.setTimeout(() => {
+      flushMarkdownDraft();
+    }, 450);
+  };
+
+  const switchMode = (nextMode: AppViewMode) => {
+    if (nextMode === "markdown") {
+      flushFocusedStructuredInput();
+    }
+    if (modeRef.current === "markdown" && nextMode !== "markdown") {
+      flushMarkdownDraft();
+    }
+    modeRef.current = nextMode;
+    setMode(nextMode);
+  };
+
+  useEffect(() => {
+    if (!activeDocument || mode !== "markdown") return;
+    const nextValue = getDocumentMarkdown(activeDocument);
+    const currentDraft = markdownDraftRef.current;
+    if (
+      currentDraft.documentId !== activeDocument.id ||
+      (!currentDraft.dirty && currentDraft.value !== nextValue)
+    ) {
+      markdownDraftRef.current = {
+        documentId: activeDocument.id,
+        value: nextValue,
+        dirty: false,
+      };
+      setMarkdownDraft(nextValue);
+    }
+  }, [activeDocument, mode]);
+
+  useEffect(() => {
+    const handleSaveShortcut = async (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "s") return;
+      event.preventDefault();
+      event.stopPropagation();
+      const nextWorkspace = flushPendingEditsRef.current() ?? workspaceRef.current;
+      if (!nextWorkspace) return;
+      await saveWorkspace(nextWorkspace);
+      showNotice("已保存到本地");
+    };
+
+    window.addEventListener("keydown", handleSaveShortcut, { capture: true });
+    return () => window.removeEventListener("keydown", handleSaveShortcut, { capture: true });
+  }, []);
+
   const selectDocument = (id: string) => {
-    const document = workspace?.documents.find((item) => item.id === id);
+    const currentWorkspace = flushPendingEdits() ?? workspaceRef.current;
+    const document = currentWorkspace?.documents.find((item) => item.id === id);
     setFocusNodeId(null);
     setActiveNodeId(firstNodeId(document?.nodes ?? []));
     commitWorkspace((current) => ({ ...current, activeDocumentId: id }));
   };
 
   const createDocument = () => {
+    flushPendingEdits();
     const id = crypto.randomUUID();
     const document: OutlineDocument = {
       id,
@@ -331,16 +582,20 @@ function App() {
   };
 
   const duplicateDocument = () => {
-    if (!activeDocument) return;
+    const currentWorkspace = flushPendingEdits() ?? workspaceRef.current;
+    const sourceDocument = currentWorkspace?.documents.find(
+      (document) => document.id === currentWorkspace.activeDocumentId,
+    ) as MarkdownDocument | undefined;
+    if (!sourceDocument) return;
     const id = crypto.randomUUID();
-    const document = {
-      ...activeDocument,
+    const document = clearDocumentMarkdown({
+      ...sourceDocument,
       id,
-      title: `${activeDocument.title} 副本`,
+      title: `${sourceDocument.title} 副本`,
       createdAt: now(),
       updatedAt: now(),
-      nodes: rekeyNodes(activeDocument.nodes),
-    };
+      nodes: rekeyNodes(sourceDocument.nodes),
+    });
     setActiveNodeId(firstNodeId(document.nodes));
     setFocusNodeId(null);
     commitWorkspace((current) => ({
@@ -352,19 +607,23 @@ function App() {
   };
 
   const deleteDocument = () => {
-    if (!activeDocument || !workspace || workspace.documents.length === 1) {
+    const currentWorkspace = flushPendingEdits() ?? workspaceRef.current;
+    const currentDocument = currentWorkspace?.documents.find(
+      (document) => document.id === currentWorkspace.activeDocumentId,
+    );
+    if (!currentDocument || !currentWorkspace || currentWorkspace.documents.length === 1) {
       showNotice("至少保留一个文档");
       return;
     }
-    const nextDocuments = workspace.documents.filter(
-      (document) => document.id !== activeDocument.id,
+    const nextDocuments = currentWorkspace.documents.filter(
+      (document) => document.id !== currentDocument.id,
     );
     const nextActive = nextDocuments[0];
-    const deletedTitle = activeDocument.title;
+    const deletedTitle = currentDocument.title;
     setActiveNodeId(firstNodeId(nextActive.nodes));
     setFocusNodeId(null);
-    setWorkspace({
-      ...workspace,
+    replaceWorkspace({
+      ...currentWorkspace,
       activeDocumentId: nextActive.id,
       documents: nextDocuments,
     });
@@ -607,9 +866,18 @@ function App() {
   };
 
   const updateTitle = (title: string) => {
+    const nextTitle = title || "未命名文档";
+    if (modeRef.current === "markdown" && activeDocument) {
+      const currentSource = markdownDraftRef.current.documentId === activeDocument.id
+        ? markdownDraftRef.current.value
+        : getDocumentMarkdown(activeDocument);
+      handleMarkdownDraftChange(replaceMarkdownTitle(currentSource, nextTitle));
+      patchActiveDocument((document) => ({ ...document, title: nextTitle }), { preserveMarkdown: true });
+      return;
+    }
     patchActiveDocument((document) => ({
       ...document,
-      title: title || "未命名文档",
+      title: nextTitle,
     }));
   };
 
@@ -619,17 +887,29 @@ function App() {
   };
 
   const exportActive = (format: ExportFormat) => {
-    if (!activeDocument) return;
-    const result = exportDocument(activeDocument, format);
-    downloadText(result.filename, result.content, result.mime);
+    const currentWorkspace = flushPendingEdits() ?? workspaceRef.current;
+    const document = currentWorkspace?.documents.find(
+      (item) => item.id === currentWorkspace.activeDocumentId,
+    ) as MarkdownDocument | undefined;
+    if (!document) return;
+    const result = exportDocument(document, format);
+    downloadText(
+      result.filename,
+      format === "markdown" ? getDocumentMarkdown(document) : result.content,
+      result.mime,
+    );
     showNotice(`已导出 ${result.filename}`);
   };
 
   const exportActivePdf = async () => {
-    if (!activeDocument) return;
+    const currentWorkspace = flushPendingEdits() ?? workspaceRef.current;
+    const document = currentWorkspace?.documents.find(
+      (item) => item.id === currentWorkspace.activeDocumentId,
+    );
+    if (!document) return;
     try {
       showNotice("正在生成 PDF...");
-      const filename = await exportDocumentAsPdf(activeDocument);
+      const filename = await exportDocumentAsPdf(document);
       showNotice(`已下载 PDF：${filename}`);
     } catch (error) {
       showNotice(error instanceof Error ? error.message : "PDF 导出失败");
@@ -637,16 +917,18 @@ function App() {
   };
 
   const exportAll = () => {
-    if (!workspace) return;
-    const result = exportWorkspace(workspace);
+    const currentWorkspace = flushPendingEdits() ?? workspaceRef.current;
+    if (!currentWorkspace) return;
+    const result = exportWorkspace(currentWorkspace);
     downloadText(result.filename, result.content, result.mime);
     showNotice(`已导出 ${result.filename}`);
   };
 
   const backupToCloud = async () => {
-    if (!workspace) return;
+    const currentWorkspace = flushPendingEdits() ?? workspaceRef.current;
+    if (!currentWorkspace) return;
     try {
-      const result = await saveICloudBackup(workspace);
+      const result = await saveICloudBackup(currentWorkspace);
       showNotice(result.ok ? `iCloud 备份已保存：${result.path}` : result.error ?? "备份失败");
     } catch (error) {
       showNotice(error instanceof Error ? error.message : String(error));
@@ -654,6 +936,7 @@ function App() {
   };
 
   const loadCloudBackup = async () => {
+    flushPendingEdits();
     if (!window.localOutline) {
       showNotice("浏览器版请用“导入”选择 iCloud Drive 里的 localoutline-workspace.json");
       return;
@@ -664,20 +947,21 @@ function App() {
       return;
     }
     const next = migrateWorkspace(result.payload);
-    setWorkspace(next);
+    replaceWorkspace(next);
     setActiveNodeId(firstNodeIdInWorkspace(next));
     setFocusNodeId(null);
     showNotice(`已载入 iCloud 备份：${result.path}`);
   };
 
   const handleImport = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    flushPendingEdits();
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file) return;
     try {
       const imported = importDocument(await file.text(), file.name);
       if ("documents" in imported) {
-        setWorkspace(imported);
+        replaceWorkspace(imported);
         setActiveNodeId(firstNodeIdInWorkspace(imported));
         setFocusNodeId(null);
         showNotice(`已导入工作区：${file.name}`);
@@ -741,7 +1025,10 @@ function App() {
             <Plus size={16} />
             新文档
           </button>
-          <button onClick={() => fileInputRef.current?.click()}>
+          <button onClick={() => {
+            flushPendingEdits();
+            fileInputRef.current?.click();
+          }}>
             <Upload size={16} />
             导入
           </button>
@@ -762,7 +1049,15 @@ function App() {
           </button>
         </nav>
 
-        <div className="document-list">
+        <div className={classNames("document-list", sidebarView === "recent" && "recent-list")}>
+          <div className="document-list-title">
+            <span>{sidebarView === "recent" ? "最近编辑" : "我的文档"}</span>
+            <small>
+              {sidebarView === "recent"
+                ? `${matchingDocuments.length} 个最近文档`
+                : `${matchingDocuments.length} 个文档`}
+            </small>
+          </div>
           {matchingDocuments.map((document) => (
             <button
               key={document.id}
@@ -775,10 +1070,18 @@ function App() {
             >
               <FileText size={16} />
               <span>{document.title}</span>
-              <small>{formatTime(document.updatedAt)}</small>
+              <small>
+                {sidebarView === "recent"
+                  ? formatRecentTime(document.updatedAt)
+                  : formatTime(document.updatedAt)}
+              </small>
             </button>
           ))}
-          {matchingDocuments.length === 0 && <span className="empty-text">没有匹配的文档</span>}
+          {matchingDocuments.length === 0 && (
+            <span className="empty-text">
+              {sidebarView === "recent" ? "暂无最近编辑文档" : "没有匹配的文档"}
+            </span>
+          )}
         </div>
 
         <div className="sidebar-section">
@@ -858,24 +1161,31 @@ function App() {
             <div className="segmented">
               <button
                 className={mode === "outline" ? "selected" : ""}
-                onClick={() => setMode("outline")}
+                onClick={() => switchMode("outline")}
               >
                 <LayoutList size={16} />
                 大纲
               </button>
               <button
                 className={mode === "mindmap" ? "selected" : ""}
-                onClick={() => setMode("mindmap")}
+                onClick={() => switchMode("mindmap")}
               >
                 <Brain size={16} />
                 脑图
               </button>
               <button
                 className={mode === "presentation" ? "selected" : ""}
-                onClick={() => setMode("presentation")}
+                onClick={() => switchMode("presentation")}
               >
                 <Presentation size={16} />
                 演示
+              </button>
+              <button
+                className={mode === "markdown" ? "selected" : ""}
+                onClick={() => switchMode("markdown")}
+              >
+                <FileText size={16} />
+                Markdown
               </button>
             </div>
 
@@ -889,30 +1199,34 @@ function App() {
         </header>
 
         <div className="toolstrip">
-          <button onClick={() => activeNodeId && insertAfter(activeNodeId)}>
-            <Plus size={16} />
-            同级
-          </button>
-          <button onClick={() => activeNodeId && insertChild(activeNodeId)}>
-            <Indent size={16} />
-            子级
-          </button>
-          <button onClick={() => activeNodeId && setFocusNodeId(activeNodeId)}>
-            <Focus size={16} />
-            聚焦
-          </button>
-          <button onClick={() => activeNodeId && moveSelected(-1)}>
-            <ArrowUp size={16} />
-            上移
-          </button>
-          <button onClick={() => activeNodeId && moveSelected(1)}>
-            <ArrowDown size={16} />
-            下移
-          </button>
-          <span className="separator" />
+          {mode !== "markdown" && (
+            <>
+              <button onClick={() => activeNodeId && insertAfter(activeNodeId)}>
+                <Plus size={16} />
+                同级
+              </button>
+              <button onClick={() => activeNodeId && insertChild(activeNodeId)}>
+                <Indent size={16} />
+                子级
+              </button>
+              <button onClick={() => activeNodeId && setFocusNodeId(activeNodeId)}>
+                <Focus size={16} />
+                聚焦
+              </button>
+              <button onClick={() => activeNodeId && moveSelected(-1)}>
+                <ArrowUp size={16} />
+                上移
+              </button>
+              <button onClick={() => activeNodeId && moveSelected(1)}>
+                <ArrowDown size={16} />
+                下移
+              </button>
+              <span className="separator" />
+            </>
+          )}
           <button onClick={() => exportActive("markdown")}>
             <Download size={16} />
-            Markdown
+            导出 MD
           </button>
           <button onClick={() => exportActive("opml")}>OPML</button>
           <button onClick={() => exportActive("freemind")}>FreeMind</button>
@@ -930,9 +1244,15 @@ function App() {
           <button onClick={loadCloudBackup}>载入备份</button>
         </div>
 
-        <div className="content">
-          <section className="editor-pane">
-            {selectedTag && (
+        <div
+          className={classNames(
+            "content",
+            mode === "markdown" && "markdown-active",
+            mode === "markdown" && `markdown-${markdownPaneMode}`,
+          )}
+        >
+          <section className={classNames("editor-pane", mode === "markdown" && "markdown-editor-pane")}>
+            {selectedTag && mode !== "markdown" && (
               <div className="filter-banner">
                 <Tag size={15} />
                 #{selectedTag} 命中 {tagHits.length} 个主题
@@ -999,71 +1319,82 @@ function App() {
                 onSelect={setActiveNodeId}
               />
             )}
+
+            {mode === "markdown" && (
+              <MarkdownView
+                value={markdownDraft}
+                viewMode={markdownPaneMode}
+                onChange={handleMarkdownDraftChange}
+                onViewModeChange={setMarkdownPaneMode}
+              />
+            )}
           </section>
 
-          <aside className="inspector">
-            <section>
-              <div className="section-title">节点详情</div>
-              {activeNode ? (
-                <>
-                  <label className="field">
-                    <span>备注</span>
-                    <textarea
-                      value={activeNode.note}
-                      onChange={(event) =>
-                        handleNodePatch(activeNode.id, { note: event.target.value })
-                      }
-                      placeholder="补充说明、行动项或引用..."
-                    />
-                  </label>
-                  <label className="field">
-                    <span>颜色</span>
-                    <select
-                      value={activeNode.color}
-                      onChange={(event) =>
-                        handleNodePatch(activeNode.id, { color: event.target.value })
-                      }
-                    >
-                      {colorOptions.map((option) => (
-                        <option key={option.value} value={option.value}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <div className="stats-row">
-                    <span>子主题</span>
-                    <strong>{activeNode.children.length}</strong>
-                  </div>
-                </>
-              ) : (
-                <p className="empty-text">选择一个主题查看详情</p>
-              )}
-            </section>
+          {mode !== "markdown" && (
+            <aside className="inspector">
+              <section>
+                <div className="section-title">节点详情</div>
+                {activeNode ? (
+                  <>
+                    <label className="field">
+                      <span>备注</span>
+                      <textarea
+                        value={activeNode.note}
+                        onChange={(event) =>
+                          handleNodePatch(activeNode.id, { note: event.target.value })
+                        }
+                        placeholder="补充说明、行动项或引用..."
+                      />
+                    </label>
+                    <label className="field">
+                      <span>颜色</span>
+                      <select
+                        value={activeNode.color}
+                        onChange={(event) =>
+                          handleNodePatch(activeNode.id, { color: event.target.value })
+                        }
+                      >
+                        {colorOptions.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <div className="stats-row">
+                      <span>子主题</span>
+                      <strong>{activeNode.children.length}</strong>
+                    </div>
+                  </>
+                ) : (
+                  <p className="empty-text">选择一个主题查看详情</p>
+                )}
+              </section>
 
-            <section>
-              <div className="section-title">
-                <Link2 size={15} />
-                文档链接
-              </div>
-              <div className="link-list">
-                {linkRows.map((row, index) => (
-                  <div key={`${row.source}-${row.link}-${index}`} className="link-row">
-                    <span>{row.source}</span>
-                    <strong>[[{row.link}]]</strong>
-                  </div>
-                ))}
-                {!linkRows.length && <p className="empty-text">用 [[文档名]] 建立链接</p>}
-              </div>
-            </section>
+              <section>
+                <div className="section-title">
+                  <Link2 size={15} />
+                  文档链接
+                </div>
+                <div className="link-list">
+                  {linkRows.map((row, index) => (
+                    <div key={`${row.source}-${row.link}-${index}`} className="link-row">
+                      <span>{row.source}</span>
+                      <strong>[[{row.link}]]</strong>
+                    </div>
+                  ))}
+                  {!linkRows.length && <p className="empty-text">用 [[文档名]] 建立链接</p>}
+                </div>
+              </section>
 
-            <section className="hint-panel">
-              <strong>快捷键</strong>
-              <span>Enter 新建同级</span>
-              <span>Tab / Shift+Tab 调整层级</span>
-              <span>Backspace 删除空主题</span>
-            </section>
-          </aside>
+              <section className="hint-panel">
+                <strong>快捷键</strong>
+                <span>Enter 新建同级</span>
+                <span>Tab / Shift+Tab 调整层级</span>
+                <span>Backspace 删除空主题</span>
+              </section>
+            </aside>
+          )}
         </div>
       </section>
 
@@ -1096,6 +1427,548 @@ function App() {
     </main>
   );
 }
+
+interface MarkdownViewProps {
+  value: string;
+  viewMode: MarkdownPaneMode;
+  onChange: (value: string) => void;
+  onViewModeChange: (mode: MarkdownPaneMode) => void;
+}
+
+function MarkdownView({
+  value,
+  viewMode,
+  onChange,
+  onViewModeChange,
+}: MarkdownViewProps) {
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const editorToolsDisabled = viewMode === "preview";
+
+  const replaceRange = (
+    start: number,
+    end: number,
+    replacement: string,
+    selectionStart = start + replacement.length,
+    selectionEnd = selectionStart,
+  ) => {
+    const next = `${value.slice(0, start)}${replacement}${value.slice(end)}`;
+    onChange(next);
+    window.requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+      textareaRef.current?.setSelectionRange(selectionStart, selectionEnd);
+    });
+  };
+
+  const selectionRange = () => {
+    const textarea = textareaRef.current;
+    return {
+      start: textarea?.selectionStart ?? value.length,
+      end: textarea?.selectionEnd ?? value.length,
+    };
+  };
+
+  const wrapSelection = (before: string, after = before, fallback = "文本") => {
+    const { start, end } = selectionRange();
+    const selected = value.slice(start, end) || fallback;
+    const replacement = `${before}${selected}${after}`;
+    replaceRange(
+      start,
+      end,
+      replacement,
+      start + before.length,
+      start + before.length + selected.length,
+    );
+  };
+
+  const updateSelectedLines = (transform: (line: string) => string) => {
+    const { start, end } = selectionRange();
+    const lineStart = value.lastIndexOf("\n", Math.max(0, start - 1)) + 1;
+    const nextBreak = value.indexOf("\n", end);
+    const lineEnd = nextBreak === -1 ? value.length : nextBreak;
+    const block = value.slice(lineStart, lineEnd);
+    const replacement = block.split("\n").map(transform).join("\n");
+    replaceRange(lineStart, lineEnd, replacement, lineStart, lineStart + replacement.length);
+  };
+
+  const setHeading = (level: 1 | 2 | 3) => {
+    updateSelectedLines((line) => {
+      const clean = line.replace(/^\s{0,3}#{1,6}\s*/, "").trim() || "标题";
+      return `${"#".repeat(level)} ${clean}`;
+    });
+  };
+
+  const prefixQuote = () => {
+    updateSelectedLines((line) => `> ${line.replace(/^\s{0,3}>\s?/, "") || "引用"}`);
+  };
+
+  const prefixList = () => {
+    updateSelectedLines((line) => {
+      const match = line.match(/^(\s*)(?:[-*+]\s+(?:\[[ xX]\]\s*)?)?(.*)$/);
+      return `${match?.[1] ?? ""}- ${match?.[2]?.trim() || "列表项"}`;
+    });
+  };
+
+  const prefixTask = () => {
+    updateSelectedLines((line) => {
+      const match = line.match(/^(\s*)(?:[-*+]\s+(?:\[[ xX]\]\s*)?)?(.*)$/);
+      return `${match?.[1] ?? ""}- [ ] ${match?.[2]?.trim() || "任务"}`;
+    });
+  };
+
+  const insertLink = () => {
+    const { start, end } = selectionRange();
+    const selected = value.slice(start, end) || "链接文本";
+    const replacement = `[${selected}](https://example.com)`;
+    replaceRange(start, end, replacement, start + 1, start + 1 + selected.length);
+  };
+
+  const insertImage = () => {
+    const { start, end } = selectionRange();
+    const selected = value.slice(start, end) || "图片描述";
+    const replacement = `![${selected}](image-url)`;
+    replaceRange(start, end, replacement, start + 2, start + 2 + selected.length);
+  };
+
+  const insertCodeBlock = () => {
+    const { start, end } = selectionRange();
+    const selected = value.slice(start, end) || "code";
+    const prefix = start > 0 && value[start - 1] !== "\n" ? "\n\n" : "";
+    const suffix = end < value.length && value[end] !== "\n" ? "\n\n" : "";
+    const replacement = `${prefix}\`\`\`\n${selected}\n\`\`\`${suffix}`;
+    const codeStart = start + prefix.length + 4;
+    replaceRange(start, end, replacement, codeStart, codeStart + selected.length);
+  };
+
+  const insertTable = () => {
+    const { start, end } = selectionRange();
+    const prefix = start > 0 && value[start - 1] !== "\n" ? "\n\n" : "";
+    const suffix = end < value.length && value[end] !== "\n" ? "\n\n" : "";
+    const table = [
+      "| 列 A | 列 B |",
+      "| --- | --- |",
+      "| 内容 | 内容 |",
+    ].join("\n");
+    replaceRange(start, end, `${prefix}${table}${suffix}`);
+  };
+
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === "Tab") {
+      event.preventDefault();
+      const { start, end } = selectionRange();
+      replaceRange(start, end, "  ");
+      return;
+    }
+    if ((event.metaKey || event.ctrlKey) && !event.shiftKey) {
+      if (event.key.toLowerCase() === "b") {
+        event.preventDefault();
+        wrapSelection("**", "**", "加粗文本");
+      } else if (event.key.toLowerCase() === "i") {
+        event.preventDefault();
+        wrapSelection("*", "*", "斜体文本");
+      }
+    }
+  };
+
+  return (
+    <div className={classNames("markdown-editor", "markdown-view", `mode-${viewMode}`, `markdown-view-${viewMode}`)}>
+      <div className="markdown-toolbar">
+        <div className="markdown-toolbar-group">
+          <button type="button" title="一级标题" disabled={editorToolsDisabled} onClick={() => setHeading(1)}>
+            <Heading1 size={16} />
+          </button>
+          <button type="button" title="二级标题" disabled={editorToolsDisabled} onClick={() => setHeading(2)}>
+            <Heading2 size={16} />
+          </button>
+          <button type="button" title="三级标题" disabled={editorToolsDisabled} onClick={() => setHeading(3)}>
+            <Heading3 size={16} />
+          </button>
+        </div>
+        <div className="markdown-toolbar-group">
+          <button type="button" title="加粗" disabled={editorToolsDisabled} onClick={() => wrapSelection("**", "**", "加粗文本")}>
+            <Bold size={16} />
+          </button>
+          <button type="button" title="斜体" disabled={editorToolsDisabled} onClick={() => wrapSelection("*", "*", "斜体文本")}>
+            <Italic size={16} />
+          </button>
+          <button type="button" title="删除线" disabled={editorToolsDisabled} onClick={() => wrapSelection("~~", "~~", "删除线文本")}>
+            <Strikethrough size={16} />
+          </button>
+          <button type="button" title="行内代码" disabled={editorToolsDisabled} onClick={() => wrapSelection("`", "`", "code")}>
+            <Code2 size={16} />
+          </button>
+        </div>
+        <div className="markdown-toolbar-group">
+          <button type="button" title="引用" disabled={editorToolsDisabled} onClick={prefixQuote}>
+            <Quote size={16} />
+          </button>
+          <button type="button" title="列表" disabled={editorToolsDisabled} onClick={prefixList}>
+            <List size={16} />
+          </button>
+          <button type="button" title="任务" disabled={editorToolsDisabled} onClick={prefixTask}>
+            <ListChecks size={16} />
+          </button>
+          <button type="button" title="链接" disabled={editorToolsDisabled} onClick={insertLink}>
+            <Link2 size={16} />
+          </button>
+          <button type="button" title="图片" disabled={editorToolsDisabled} onClick={insertImage}>
+            <Image size={16} />
+          </button>
+          <button type="button" title="代码块" disabled={editorToolsDisabled} onClick={insertCodeBlock}>
+            <Code2 size={16} />
+          </button>
+          <button type="button" title="表格" disabled={editorToolsDisabled} onClick={insertTable}>
+            <Table size={16} />
+          </button>
+        </div>
+        <div className="markdown-toolbar-group markdown-mode-toggle markdown-view-toggle">
+          <button
+            type="button"
+            title="编辑"
+            className={viewMode === "edit" ? "selected" : ""}
+            onClick={() => onViewModeChange("edit")}
+          >
+            <Pencil size={16} />
+          </button>
+          <button
+            type="button"
+            title="预览"
+            className={viewMode === "preview" ? "selected" : ""}
+            onClick={() => onViewModeChange("preview")}
+          >
+            <Eye size={16} />
+          </button>
+          <button
+            type="button"
+            title="分栏"
+            className={viewMode === "split" ? "selected" : ""}
+            onClick={() => onViewModeChange("split")}
+          >
+            <Columns2 size={16} />
+          </button>
+        </div>
+      </div>
+
+      <div className="markdown-workbench">
+        {viewMode !== "preview" && (
+          <textarea
+            ref={textareaRef}
+            className="markdown-source"
+            value={value}
+            onChange={(event) => onChange(event.target.value)}
+            onKeyDown={handleKeyDown}
+            spellCheck={false}
+            aria-label="Markdown 源码"
+          />
+        )}
+        {viewMode !== "edit" && (
+          <MarkdownPreview content={value} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function MarkdownPreview({ content }: { content: string }) {
+  const blocks: React.ReactNode[] = [];
+  const lines = content.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n").split("\n");
+  let index = 0;
+
+  while (index < lines.length) {
+    const line = lines[index];
+
+    if (!line.trim()) {
+      index += 1;
+      continue;
+    }
+
+    const fence = line.match(/^\s{0,3}(```+|~~~+)\s*(.*)$/);
+    if (fence) {
+      const marker = fence[1];
+      const language = fence[2].trim();
+      const codeLines: string[] = [];
+      index += 1;
+      while (index < lines.length && !lines[index].trimStart().startsWith(marker)) {
+        codeLines.push(lines[index]);
+        index += 1;
+      }
+      if (index < lines.length) index += 1;
+      blocks.push(
+        <pre key={`code-${index}`} className="markdown-preview-code">
+          <code data-language={language || undefined}>{codeLines.join("\n")}</code>
+        </pre>,
+      );
+      continue;
+    }
+
+    const heading = line.match(/^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/);
+    if (heading) {
+      const level = Math.min(heading[1].length, 6);
+      const Tag = `h${level}` as keyof JSX.IntrinsicElements;
+      blocks.push(
+        <Tag key={`heading-${index}`}>
+          {renderInlineMarkdown(heading[2], `heading-${index}`)}
+        </Tag>,
+      );
+      index += 1;
+      continue;
+    }
+
+    if (isTableStart(lines, index)) {
+      const tableLines = [lines[index], lines[index + 1]];
+      index += 2;
+      while (index < lines.length && lines[index].includes("|") && lines[index].trim()) {
+        tableLines.push(lines[index]);
+        index += 1;
+      }
+      const headers = splitMarkdownTableRow(tableLines[0]);
+      const rows = tableLines.slice(2).map(splitMarkdownTableRow);
+      blocks.push(
+        <table key={`table-${index}`} className="markdown-preview-table">
+          <thead>
+            <tr>
+              {headers.map((cell, cellIndex) => (
+                <th key={`head-${cellIndex}`}>
+                  {renderInlineMarkdown(cell, `table-head-${index}-${cellIndex}`)}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, rowIndex) => (
+              <tr key={`row-${rowIndex}`}>
+                {row.map((cell, cellIndex) => (
+                  <td key={`cell-${rowIndex}-${cellIndex}`}>
+                    {renderInlineMarkdown(cell, `table-cell-${index}-${rowIndex}-${cellIndex}`)}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>,
+      );
+      continue;
+    }
+
+    const listItem = line.match(/^(\s*)(?:[-*+]|\d+[.)])\s+(?:\[( |x|X)\]\s+)?(.*)$/);
+    if (listItem) {
+      const items: Array<{ indent: number; checked?: boolean; text: string }> = [];
+      while (index < lines.length) {
+        const item = lines[index].match(/^(\s*)(?:[-*+]|\d+[.)])\s+(?:\[( |x|X)\]\s+)?(.*)$/);
+        if (!item) break;
+        items.push({
+          indent: item[1].replace(/\t/g, "    ").length,
+          checked: item[2] ? item[2].toLowerCase() === "x" : undefined,
+          text: item[3],
+        });
+        index += 1;
+      }
+      blocks.push(renderMarkdownPreviewList(buildMarkdownPreviewList(items), `list-${index}`));
+      continue;
+    }
+
+    if (/^\s{0,3}>\s?/.test(line)) {
+      const quoteLines: string[] = [];
+      while (index < lines.length && /^\s{0,3}>\s?/.test(lines[index])) {
+        quoteLines.push(lines[index].replace(/^\s{0,3}>\s?/, ""));
+        index += 1;
+      }
+      blocks.push(
+        <blockquote key={`quote-${index}`}>
+          {quoteLines.map((quoteLine, quoteIndex) => (
+            <p key={`quote-line-${quoteIndex}`}>
+              {renderInlineMarkdown(quoteLine, `quote-${index}-${quoteIndex}`)}
+            </p>
+          ))}
+        </blockquote>,
+      );
+      continue;
+    }
+
+    const paragraphLines = [line.trim()];
+    index += 1;
+    while (
+      index < lines.length &&
+      lines[index].trim() &&
+      !/^\s{0,3}(```|~~~)/.test(lines[index]) &&
+      !/^\s{0,3}#{1,6}\s+/.test(lines[index]) &&
+      !/^(\s*)(?:[-*+]|\d+[.)])\s+/.test(lines[index]) &&
+      !/^\s{0,3}>\s?/.test(lines[index]) &&
+      !isTableStart(lines, index)
+    ) {
+      paragraphLines.push(lines[index].trim());
+      index += 1;
+    }
+    blocks.push(
+      <p key={`paragraph-${index}`}>
+        {renderInlineMarkdown(paragraphLines.join(" "), `paragraph-${index}`)}
+      </p>,
+    );
+  }
+
+  return (
+    <div className="markdown-preview" aria-label="Markdown 预览">
+      {blocks.length ? blocks : <p className="empty-text">暂无 Markdown 内容</p>}
+    </div>
+  );
+}
+
+const splitMarkdownTableRow = (row: string) =>
+  splitEscapedPipe(row.trim().replace(/^\|/, "").replace(/\|$/, "")).map((cell) => cell.trim());
+
+const splitEscapedPipe = (value: string) => {
+  const cells: string[] = [];
+  let cell = "";
+  let escaping = false;
+
+  Array.from(value).forEach((char) => {
+    if (escaping) {
+      cell += char;
+      escaping = false;
+      return;
+    }
+    if (char === "\\") {
+      escaping = true;
+      return;
+    }
+    if (char === "|") {
+      cells.push(cell);
+      cell = "";
+      return;
+    }
+    cell += char;
+  });
+
+  if (escaping) cell += "\\";
+  cells.push(cell);
+  return cells;
+};
+
+const isTableSeparator = (row: string) =>
+  splitMarkdownTableRow(row).every((cell) => /^:?-{3,}:?$/.test(cell));
+
+const isTableStart = (lines: string[], index: number) =>
+  Boolean(lines[index]?.includes("|") && lines[index + 1]?.includes("|") && isTableSeparator(lines[index + 1]));
+
+interface MarkdownPreviewListItem {
+  text: string;
+  checked?: boolean;
+  children: MarkdownPreviewListItem[];
+}
+
+const buildMarkdownPreviewList = (
+  items: Array<{ indent: number; checked?: boolean; text: string }>,
+) => {
+  const roots: MarkdownPreviewListItem[] = [];
+  const stack: Array<{ indent: number; children: MarkdownPreviewListItem[] }> = [
+    { indent: -1, children: roots },
+  ];
+
+  items.forEach((item) => {
+    while (stack.length > 1 && item.indent <= stack[stack.length - 1].indent) {
+      stack.pop();
+    }
+
+    const node: MarkdownPreviewListItem = {
+      text: item.text,
+      checked: item.checked,
+      children: [],
+    };
+    stack[stack.length - 1].children.push(node);
+    stack.push({ indent: item.indent, children: node.children });
+  });
+
+  return roots;
+};
+
+const renderMarkdownPreviewList = (
+  items: MarkdownPreviewListItem[],
+  keyPrefix: string,
+): React.ReactNode => (
+  <ul key={keyPrefix} className="markdown-preview-list">
+    {items.map((item, itemIndex) => (
+      <li
+        key={`${keyPrefix}-${itemIndex}`}
+        className={item.checked !== undefined ? "task-item" : undefined}
+      >
+        <span className="markdown-preview-list-line">
+          {item.checked !== undefined && (
+            <input type="checkbox" checked={item.checked} readOnly />
+          )}
+          <span>{renderInlineMarkdown(item.text, `${keyPrefix}-${itemIndex}`)}</span>
+        </span>
+        {item.children.length > 0 &&
+          renderMarkdownPreviewList(item.children, `${keyPrefix}-${itemIndex}-children`)}
+      </li>
+    ))}
+  </ul>
+);
+
+const safeMarkdownUrl = (value: string, kind: "link" | "image") => {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  const protocol = trimmed.match(/^([a-z][a-z0-9+.-]*):/i)?.[1]?.toLowerCase();
+  if (!protocol) return trimmed;
+  if (protocol === "http" || protocol === "https" || protocol === "mailto" || protocol === "tel") {
+    return trimmed;
+  }
+  if (kind === "image" && protocol === "data" && /^data:image\//i.test(trimmed)) {
+    return trimmed;
+  }
+  return "";
+};
+
+const renderInlineMarkdown = (text: string, keyPrefix: string): React.ReactNode[] => {
+  const nodes: React.ReactNode[] = [];
+  const tokenPattern =
+    /(!\[([^\]]*)\]\(([^)]+)\)|\[([^\]]+)\]\(([^)]+)\)|`([^`]+)`|\*\*([^*]+)\*\*|__([^_]+)__|~~([^~]+)~~|\*([^*]+)\*|_([^_]+)_)/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = tokenPattern.exec(text))) {
+    if (match.index > lastIndex) {
+      nodes.push(text.slice(lastIndex, match.index));
+    }
+
+    const key = `${keyPrefix}-${match.index}`;
+    if (match[2] !== undefined) {
+      const source = safeMarkdownUrl(match[3], "image");
+      nodes.push(
+        source ? (
+          <img key={key} src={source} alt={match[2]} className="markdown-preview-image" />
+        ) : (
+          <span key={key}>{match[2]}</span>
+        ),
+      );
+    } else if (match[4] !== undefined) {
+      const href = safeMarkdownUrl(match[5], "link");
+      nodes.push(
+        href ? (
+          <a key={key} href={href} target="_blank" rel="noreferrer">
+            {match[4]}
+          </a>
+        ) : (
+          <span key={key}>{match[4]}</span>
+        ),
+      );
+    } else if (match[6] !== undefined) {
+      nodes.push(<code key={key}>{match[6]}</code>);
+    } else if (match[7] !== undefined || match[8] !== undefined) {
+      nodes.push(<strong key={key}>{match[7] ?? match[8]}</strong>);
+    } else if (match[9] !== undefined) {
+      nodes.push(<del key={key}>{match[9]}</del>);
+    } else {
+      nodes.push(<em key={key}>{match[10] ?? match[11]}</em>);
+    }
+
+    lastIndex = tokenPattern.lastIndex;
+  }
+
+  if (lastIndex < text.length) {
+    nodes.push(text.slice(lastIndex));
+  }
+
+  return nodes;
+};
 
 interface OutlineViewProps {
   nodes: OutlineNode[];
@@ -1298,7 +2171,7 @@ const OutlineNodeRow = React.memo(function OutlineNodeRow({
         {node.imageName && (
           <span className="node-attachment">
             <Image size={13} />
-            {node.imageName}
+            {node.imageAlt || node.imageName}
           </span>
         )}
         {node.table && (
@@ -1611,6 +2484,7 @@ function NodeMenu({
           onClick={() =>
             onPatch({
               imageName: node.imageName ? undefined : "本地图片占位",
+              imageAlt: undefined,
             })
           }
         >
@@ -2254,7 +3128,7 @@ function MindMapContextMenu({
   );
 }
 
-const splitMindMapLines = (value: string, maxChars = 15) => {
+const splitMindMapLines = (value: string, maxChars = 30) => {
   const text = value.trim() || "输入文字";
   const chars = Array.from(text);
   const lines: string[] = [];
@@ -2265,8 +3139,11 @@ const splitMindMapLines = (value: string, maxChars = 15) => {
 };
 
 const mindMapMetrics = (node: OutlineNode, depth: number) => {
-  const lines = splitMindMapLines(`${node.icon ? `${node.icon} ` : ""}${node.text || "输入文字"}`);
-  const width = depth === 0 ? 220 : 236;
+  const lines = splitMindMapLines(
+    `${node.icon ? `${node.icon} ` : ""}${node.text || "输入文字"}`,
+    depth === 0 ? 24 : 30,
+  );
+  const width = depth === 0 ? 300 : 360;
   const minHeight = depth === 0 ? 58 : 52;
   const height = Math.max(minHeight, lines.length * 19 + 22);
   return { lines, width, height };
@@ -2274,7 +3151,7 @@ const mindMapMetrics = (node: OutlineNode, depth: number) => {
 
 function createMindMapLayout(nodes: OutlineNode[]) {
   const items: MindMapItem[] = [];
-  const xGap = 260;
+  const xGap = 390;
   const yGap = 34;
   const pad = 48;
   let cursor = 0;

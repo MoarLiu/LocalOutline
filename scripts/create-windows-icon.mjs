@@ -3,21 +3,21 @@ import { execFileSync } from "node:child_process";
 import path from "node:path";
 
 const projectRoot = path.resolve(import.meta.dirname, "..");
-const source =
-  process.argv[2] ??
-  "/Users/crazyjal/Library/Application Support/CleanShot/media/media_SGNNhJ8hjH/CleanShot 2026-05-16 at 23.03.12@2x.png";
 const buildDir = path.join(projectRoot, "build");
 const iconsetDir = path.join(buildDir, "win-icon-png");
 const squareSource = path.join(buildDir, "win-icon-source.png");
+const source = process.argv[2] ? path.resolve(process.argv[2]) : squareSource;
 const output = path.join(buildDir, "icon.ico");
 const sizes = [16, 24, 32, 48, 64, 128, 256];
 
 await mkdir(iconsetDir, { recursive: true });
 await rm(output, { force: true });
 
-execFileSync("sips", ["--cropToHeightWidth", "72", "72", source, "--out", squareSource], {
-  stdio: "ignore",
-});
+if (source !== squareSource) {
+  execFileSync("sips", ["--cropToHeightWidth", "72", "72", source, "--out", squareSource], {
+    stdio: "ignore",
+  });
+}
 
 const images = [];
 for (const size of sizes) {

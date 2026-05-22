@@ -2,6 +2,8 @@
 
 一个参考幕布产品逻辑的本地优先大纲工具：以树状大纲为核心数据模型，同一份数据可切换为大纲、思维导图和演示视图。数据默认存储在浏览器本地 IndexedDB，桌面版可自动备份到 iCloud Drive。
 
+当前版本：1.1.0。
+
 ## 运行
 
 ```bash
@@ -27,7 +29,7 @@ npm run electron:dist:mac
 npm run electron:dist:win
 ```
 
-产物会输出到 `release/`，包括 macOS 的 `Local Outline-版本号-arm64.zip` 和 Windows 的 `Local Outline-版本号-x64.zip`。当前使用本机 ad-hoc/未签名打包，适合个人安装测试；正式分发给其他用户时需要接入 Apple Developer ID 签名、notarization 或 Windows 代码签名。
+产物会输出到 `release/`，包括 macOS 的 `Local Outline-版本号-arm64.dmg` 和 Windows 的 `Local Outline-版本号-x64.zip`。当前使用本机 ad-hoc/未签名打包，适合个人安装测试；正式分发给其他用户时需要接入 Apple Developer ID 签名、notarization 或 Windows 代码签名。
 
 ## 公网单用户部署
 
@@ -65,11 +67,13 @@ npm run start:web
 ## 当前能力
 
 - 大纲编辑：新增同级、子级、缩进、反缩进、折叠、聚焦、任务勾选、备注、颜色。
-- 多视图：大纲编辑、思维导图、演示视图。
+- 多视图：大纲编辑、Markdown 编辑/预览、思维导图、演示视图。
+- Markdown 模式：支持源码编辑、分栏编辑预览、纯编辑和纯预览切换。
 - 知识组织：全文搜索、标签 `#tag`、文档链接 `[[文档名]]`。
 - 导入导出：JSON 工作区、Markdown、OPML、FreeMind、HTML。
 - 文件导出：PDF 直接下载。
-- 本地优先：浏览器 IndexedDB 自动保存。
+- 本地优先：浏览器 IndexedDB 自动保存，Ctrl/Cmd+S 可触发本地保存。
+- 输入空间：大纲编辑宽度提升到约 1040px，脑图节点支持更长单行文本。
 - iCloud 备份：浏览器版可选择 iCloud Drive 文件夹写入；Electron 版写入 `~/Library/Mobile Documents/com~apple~CloudDocs/LocalOutline/`。
 
 ## 后续方向

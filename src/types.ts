@@ -1,4 +1,4 @@
-export type ViewMode = "outline" | "mindmap" | "presentation";
+export type ViewMode = "outline" | "mindmap" | "presentation" | "markdown";
 
 export interface OutlineNode {
   id: string;
@@ -15,6 +15,7 @@ export interface OutlineNode {
   highlight?: boolean;
   icon?: string;
   imageName?: string;
+  imageAlt?: string;
   table?: string[][];
   isTodo?: boolean;
   children: OutlineNode[];
@@ -25,6 +26,8 @@ export interface OutlineDocument {
   title: string;
   createdAt: string;
   updatedAt: string;
+  markdownSource?: string;
+  markdownUpdatedAt?: string;
   nodes: OutlineNode[];
 }
 

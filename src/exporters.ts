@@ -1,11 +1,14 @@
 import type { PDFFont, PDFPage, RGB } from "pdf-lib";
 import type { OutlineDocument, OutlineNode, Workspace } from "./types";
 import { migrateDocument, migrateWorkspace } from "./migrations";
-import { createNode } from "./tree";
+import { createNode, normalizeColor } from "./tree";
+import {
+  DEFAULT_DOCUMENT_TITLE,
+  DEFAULT_NODE_TEXT,
+  documentToMarkdown,
+  parseMarkdownDocument,
+} from "./markdown";
 import pdfFontUrl from "./assets/ArialUnicode.ttf?url";
-
-const DEFAULT_DOCUMENT_TITLE = "未命名文档";
-const DEFAULT_NODE_TEXT = "未命名主题";
 
 const escapeXml = (value: string) =>
   value
@@ -24,6 +27,24 @@ const nodeNote = (node: OutlineNode) => node.note || "";
 
 const nodeChildren = (node: OutlineNode) =>
   Array.isArray(node.children) ? node.children : [];
+
+const normalizeHeadingLevel = (value: string | null): OutlineNode["headingLevel"] => {
+  if (value === "1" || value === "2" || value === "3") return Number(value) as 1 | 2 | 3;
+  return 0;
+};
+
+const parseOpmlTable = (value: string | null) => {
+  if (!value) return undefined;
+  try {
+    const table = JSON.parse(value);
+    if (!Array.isArray(table)) return undefined;
+    return table
+      .filter(Array.isArray)
+      .map((row) => row.map((cell) => (typeof cell === "string" ? cell : "")));
+  } catch {
+    return undefined;
+  }
+};
 
 type RgbFactory = (red: number, green: number, blue: number) => RGB;
 
@@ -54,26 +75,31 @@ const sanitizeFilenameBase = (value: string) => {
 const exportFilename = (title: string, extension: string) =>
   `${sanitizeFilenameBase(title || DEFAULT_DOCUMENT_TITLE)}.${extension}`;
 
-const markdownInline = (value: string) =>
-  value.replace(/\r?\n/g, " ").trim() || DEFAULT_NODE_TEXT;
-
-const markdownNode = (node: OutlineNode, depth: number): string => {
-  const indent = "  ".repeat(depth);
-  const checked = node.checked ? "[x] " : "";
-  const note = nodeNote(node)
-    ? `\n${indent}  > ${nodeNote(node).replace(/\r?\n/g, `\n${indent}  > `)}`
-    : "";
-  return [
-    `${indent}- ${checked}${markdownInline(nodeText(node))}${note}`,
-    ...nodeChildren(node).map((child) => markdownNode(child, depth + 1)),
-  ].join("\n");
-};
+const opmlOptionalAttrs = (attrs: Record<string, string | number | boolean | undefined>) =>
+  Object.entries(attrs)
+    .filter(([, value]) => value !== undefined && value !== "" && value !== false)
+    .map(([key, value]) => ` ${key}="${escapeXml(String(value))}"`)
+    .join("");
 
 const opmlNode = (node: OutlineNode, depth = 2): string => {
   const pad = "  ".repeat(depth);
   const attrs = `text="${escapeXml(nodeText(node))}" _note="${escapeXml(
     nodeNote(node),
-  )}" _checked="${node.checked ? "true" : "false"}"`;
+  )}" _checked="${node.checked ? "true" : "false"}"${opmlOptionalAttrs({
+    _isTodo: node.isTodo,
+    _collapsed: node.collapsed,
+    _color: node.color && node.color !== "plain" ? node.color : undefined,
+    _headingLevel: node.headingLevel,
+    _bold: node.bold,
+    _italic: node.italic,
+    _underline: node.underline,
+    _strike: node.strike,
+    _highlight: node.highlight,
+    _icon: node.icon,
+    _imageName: node.imageName,
+    _imageAlt: node.imageAlt,
+    _table: node.table ? JSON.stringify(node.table) : undefined,
+  })}`;
   const children = nodeChildren(node);
   if (!children.length) return `${pad}<outline ${attrs}/>`;
   return [
@@ -162,9 +188,7 @@ export const exportDocument = (
     return {
       filename: exportFilename(title, "md"),
       mime: "text/markdown",
-      content: [`# ${markdownInline(title)}`, "", ...document.nodes.map((node) => markdownNode(node, 0))].join(
-        "\n",
-      ),
+      content: documentToMarkdown(document),
     };
   }
 
@@ -425,6 +449,19 @@ const parseOutlineElement = (element: Element): OutlineNode => ({
   ...createNode(element.getAttribute("text") || element.getAttribute("title") || "未命名主题"),
   note: element.getAttribute("_note") || "",
   checked: element.getAttribute("_checked") === "true",
+  collapsed: element.getAttribute("_collapsed") === "true",
+  color: normalizeColor(element.getAttribute("_color") || "plain"),
+  headingLevel: normalizeHeadingLevel(element.getAttribute("_headingLevel")),
+  bold: element.getAttribute("_bold") === "true",
+  italic: element.getAttribute("_italic") === "true",
+  underline: element.getAttribute("_underline") === "true",
+  strike: element.getAttribute("_strike") === "true",
+  highlight: element.getAttribute("_highlight") === "true",
+  isTodo: element.getAttribute("_isTodo") === "true",
+  icon: element.getAttribute("_icon") || undefined,
+  imageName: element.getAttribute("_imageName") || undefined,
+  imageAlt: element.getAttribute("_imageAlt") || undefined,
+  table: parseOpmlTable(element.getAttribute("_table")),
   children: Array.from(element.children)
     .filter((child) => child.tagName.toLowerCase() === "outline")
     .map(parseOutlineElement),
@@ -436,77 +473,6 @@ const parseFreeMindElement = (element: Element): OutlineNode => ({
     .filter((child) => child.tagName.toLowerCase() === "node")
     .map(parseFreeMindElement),
 });
-
-const extensionlessFilename = (filename: string, extensionPattern: RegExp) =>
-  filename.replace(extensionPattern, "").trim() || DEFAULT_DOCUMENT_TITLE;
-
-const markdownTitle = (line: string) => {
-  const match = line.match(/^\s{0,3}#(?!#)\s+(.*?)\s*$/);
-  return match?.[1]?.replace(/\s+#+\s*$/, "").trim() || null;
-};
-
-const indentationWidth = (indent: string) =>
-  Array.from(indent).reduce((width, char) => width + (char === "\t" ? 4 : 1), 0);
-
-const unescapeMarkdownInline = (value: string) =>
-  value.replace(/\\([\\`*_[\]{}()#+\-.!>])/g, "$1");
-
-const parseMarkdownDocument = (content: string, filename: string): OutlineDocument => {
-  const now = new Date().toISOString();
-  const lines = content.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n").split("\n");
-  const title =
-    lines.map(markdownTitle).find((value): value is string => Boolean(value)) ||
-    extensionlessFilename(filename, /\.(md|markdown)$/i);
-  const nodes: OutlineNode[] = [];
-  const stack: Array<{ indent: number; node: OutlineNode }> = [];
-
-  lines.forEach((line) => {
-    if (markdownTitle(line)) return;
-
-    const bullet = line.match(/^([ \t]*)([-*+])\s+(?:\[( |x|X)\]\s*)?(.*)$/);
-    if (bullet) {
-      const indent = indentationWidth(bullet[1]);
-      const checked = bullet[3]?.toLowerCase() === "x";
-      const node = createNode(
-        unescapeMarkdownInline(bullet[4].trim()) || DEFAULT_NODE_TEXT,
-      );
-      node.checked = checked;
-
-      while (stack.length && stack[stack.length - 1].indent >= indent) {
-        stack.pop();
-      }
-
-      const parent = stack[stack.length - 1]?.node;
-      if (parent) {
-        parent.children.push(node);
-      } else {
-        nodes.push(node);
-      }
-
-      stack.push({ indent, node });
-      return;
-    }
-
-    const quote = line.match(/^([ \t]*)>\s?(.*)$/);
-    if (quote && stack.length) {
-      const indent = indentationWidth(quote[1]);
-      const target =
-        [...stack].reverse().find((item) => item.indent <= indent)?.node ||
-        stack[stack.length - 1].node;
-      target.note = target.note
-        ? `${target.note}\n${quote[2]}`
-        : quote[2];
-    }
-  });
-
-  return {
-    id: crypto.randomUUID(),
-    title,
-    createdAt: now,
-    updatedAt: now,
-    nodes: nodes.length ? nodes : [createNode(DEFAULT_NODE_TEXT)],
-  };
-};
 
 export const importDocument = (content: string, filename: string): OutlineDocument | Workspace => {
   const now = new Date().toISOString();
@@ -523,7 +489,7 @@ export const importDocument = (content: string, filename: string): OutlineDocume
   }
 
   if (/\.(md|markdown)$/i.test(filename)) {
-    return parseMarkdownDocument(content, filename);
+    return parseMarkdownDocument(content, { filename });
   }
 
   const parser = new DOMParser();

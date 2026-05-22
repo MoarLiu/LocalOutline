@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDown,
   ArrowUp,
@@ -6,6 +6,7 @@ import {
   Brain,
   CheckCircle2,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   Circle,
   Clock,
@@ -27,7 +28,11 @@ import {
   LayoutList,
   Link2,
   ListTree,
+  Maximize2,
+  Moon,
   Palette,
+  Pause,
+  Play,
   Plus,
   Presentation,
   RotateCcw,
@@ -35,6 +40,7 @@ import {
   Smile,
   Star,
   Strikethrough,
+  Sun,
   Table,
   Tag,
   Trash2,
@@ -54,6 +60,7 @@ import {
   exportWorkspace,
   importDocument,
 } from "./exporters";
+import { firstDocument, migrateWorkspace } from "./migrations";
 import { createStarterWorkspace } from "./sample";
 import { loadWorkspace, saveWorkspace } from "./storage";
 import type { OutlineDocument, OutlineNode, ViewMode, Workspace } from "./types";
@@ -70,6 +77,7 @@ import {
   indentNode,
   insertParent,
   insertSiblingAfter,
+  mergeNodes,
   moveNode,
   nodeText,
   normalizeColor,
@@ -119,6 +127,9 @@ const renderNodeMarkdown = (node: OutlineNode, depth = 0): string => {
 const nodeContainsId = (node: OutlineNode, id: string): boolean =>
   node.id === id || node.children.some((child) => nodeContainsId(child, id));
 
+const firstNodeIdInWorkspace = (workspace: Workspace) =>
+  firstNodeId(firstDocument(workspace).nodes);
+
 const formatTime = (iso: string) =>
   new Intl.DateTimeFormat("zh-CN", {
     month: "2-digit",
@@ -153,8 +164,26 @@ function App() {
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
   const [nodeClipboard, setNodeClipboard] = useState<NodeClipboard | null>(null);
   const [notice, setNotice] = useState("本地自动保存已开启");
+  const [noticeKey, setNoticeKey] = useState(0);
+  const [showConfirmDelete, setShowConfirmDelete] = useState(false);
+  const [sidebarView, setSidebarView] = useState<"all" | "recent">("all");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const inputRefs = useRef(new Map<string, HTMLInputElement>());
+  const inputRefs = useRef(new Map<string, HTMLTextAreaElement>());
+
+  const [theme, setTheme] = useState<"light" | "dark">(
+    () => (localStorage.getItem("theme") as "light" | "dark") || "light"
+  );
+  const [pendingCaretFocus, setPendingCaretFocus] = useState<{ id: string; position: number } | null>(null);
+
+  const showNotice = (message: string) => {
+    setNotice(message);
+    setNoticeKey((k) => k + 1);
+  };
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+    localStorage.setItem("theme", theme);
+  }, [theme]);
 
   useEffect(() => {
     let mounted = true;
@@ -162,7 +191,7 @@ function App() {
       if (!mounted) return;
       const next = stored ?? createStarterWorkspace();
       setWorkspace(next);
-      setActiveNodeId(firstNodeId(next.documents[0]?.nodes ?? []));
+      setActiveNodeId(firstNodeIdInWorkspace(next));
       setReady(true);
     });
     return () => {
@@ -181,10 +210,17 @@ function App() {
   useEffect(() => {
     if (!activeNodeId) return;
     const handle = window.setTimeout(() => {
-      inputRefs.current.get(activeNodeId)?.focus();
+      const input = inputRefs.current.get(activeNodeId);
+      if (input) {
+        input.focus();
+        if (pendingCaretFocus && pendingCaretFocus.id === activeNodeId) {
+          input.setSelectionRange(pendingCaretFocus.position, pendingCaretFocus.position);
+          setPendingCaretFocus(null);
+        }
+      }
     }, 20);
     return () => window.clearTimeout(handle);
-  }, [activeNodeId, mode]);
+  }, [activeNodeId, mode, pendingCaretFocus]);
 
   const activeDocument = useMemo(() => {
     if (!workspace) return null;
@@ -232,7 +268,7 @@ function App() {
   const matchingDocuments = useMemo(() => {
     if (!workspace) return [];
     const query = search.trim().toLowerCase();
-    return workspace.documents.filter((document) => {
+    const filtered = workspace.documents.filter((document) => {
       const matchesQuery = !query || collectDocumentText(document).includes(query);
       const matchesTag =
         !selectedTag ||
@@ -241,7 +277,11 @@ function App() {
         );
       return matchesQuery && matchesTag;
     });
-  }, [search, selectedTag, workspace]);
+    if (sidebarView === "recent") {
+      return [...filtered].sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
+    }
+    return filtered;
+  }, [search, selectedTag, workspace, sidebarView]);
 
   const commitWorkspace = (updater: (workspace: Workspace) => Workspace) => {
     setWorkspace((current) => (current ? updater(current) : current));
@@ -287,6 +327,7 @@ function App() {
       activeDocumentId: id,
       documents: [document, ...current.documents],
     }));
+    showNotice("已创建新文档");
   };
 
   const duplicateDocument = () => {
@@ -307,17 +348,19 @@ function App() {
       activeDocumentId: id,
       documents: [document, ...current.documents],
     }));
+    showNotice(`已创建副本：${document.title}`);
   };
 
   const deleteDocument = () => {
     if (!activeDocument || !workspace || workspace.documents.length === 1) {
-      setNotice("至少保留一个文档");
+      showNotice("至少保留一个文档");
       return;
     }
     const nextDocuments = workspace.documents.filter(
       (document) => document.id !== activeDocument.id,
     );
     const nextActive = nextDocuments[0];
+    const deletedTitle = activeDocument.title;
     setActiveNodeId(firstNodeId(nextActive.nodes));
     setFocusNodeId(null);
     setWorkspace({
@@ -325,6 +368,7 @@ function App() {
       activeDocumentId: nextActive.id,
       documents: nextDocuments,
     });
+    showNotice(`已删除文档：${deletedTitle}`);
   };
 
   const handleNodeText = (id: string, text: string) => {
@@ -348,9 +392,9 @@ function App() {
     const link = `[[${activeDocument.title}#${node.text || "未命名主题"}]]`;
     try {
       await navigator.clipboard.writeText(link);
-      setNotice("已复制主题链接");
+      showNotice("已复制主题链接");
     } catch {
-      setNotice(link);
+      showNotice(link);
     }
   };
 
@@ -360,7 +404,7 @@ function App() {
     const title = node.text || "未命名主题";
     const content = [`# ${title}`, "", renderNodeMarkdown(node)].join("\n");
     downloadText(`${title.replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_")}.md`, content, "text/markdown");
-    setNotice(`已导出主题：${title}`);
+    showNotice(`已导出主题：${title}`);
   };
 
   const insertAfter = (id: string) => {
@@ -373,7 +417,11 @@ function App() {
   const insertChild = (id: string) => {
     if (!activeDocument) return;
     const node = createNode("");
-    setActiveNodes(addChild(activeDocument.nodes, id, node));
+    if (id === "__local_outline_mindmap_root__") {
+      setActiveNodes([...activeDocument.nodes, node]);
+    } else {
+      setActiveNodes(addChild(activeDocument.nodes, id, node));
+    }
     setActiveNodeId(node.id);
   };
 
@@ -383,6 +431,7 @@ function App() {
     setActiveNodes(next);
     setActiveNodeId(firstNodeId(next));
     if (focusNodeId === id) setFocusNodeId(null);
+    showNotice("已删除主题");
   };
 
   const duplicateNode = (id: string) => {
@@ -392,7 +441,7 @@ function App() {
     const [copy] = rekeyNodes([node]);
     setActiveNodes(insertSiblingAfter(activeDocument.nodes, id, copy));
     setActiveNodeId(copy.id);
-    setNotice("已创建主题副本");
+    showNotice("已创建主题副本");
   };
 
   const insertParentNode = (id: string) => {
@@ -400,7 +449,7 @@ function App() {
     const parent = createNode("上级主题");
     setActiveNodes(insertParent(activeDocument.nodes, id, parent));
     setActiveNodeId(parent.id);
-    setNotice("已插入上级主题");
+    showNotice("已插入上级主题");
   };
 
   const copyNodeToClipboard = async (id: string) => {
@@ -416,7 +465,7 @@ function App() {
     } catch {
       // Browser clipboard permission is best-effort; the in-app clipboard still works.
     }
-    setNotice("已复制主题，可在脑图中粘贴");
+    showNotice("已复制主题，可在脑图中粘贴");
   };
 
   const cutNodeToClipboard = (id: string) => {
@@ -427,7 +476,7 @@ function App() {
       sourceId: id,
       node: cloneNodes([node])[0],
     });
-    setNotice("已剪切主题，选择目标后粘贴");
+    showNotice("已剪切主题，选择目标后粘贴");
   };
 
   const pasteNodeAsChild = (targetId: string) => {
@@ -438,7 +487,7 @@ function App() {
       sourceNode &&
       nodeContainsId(sourceNode, targetId)
     ) {
-      setNotice("不能把主题粘贴到自己或自己的子主题里");
+      showNotice("不能把主题粘贴到自己或自己的子主题里");
       return;
     }
 
@@ -447,13 +496,15 @@ function App() {
       nodeClipboard.mode === "cut" && sourceNode
         ? removeNode(activeDocument.nodes, nodeClipboard.sourceId)
         : activeDocument.nodes;
-    const next = addChild(baseNodes, targetId, pasted);
+    const next = targetId === "__local_outline_mindmap_root__"
+      ? [...baseNodes, pasted]
+      : addChild(baseNodes, targetId, pasted);
     setActiveNodes(next);
     setActiveNodeId(pasted.id);
     if (nodeClipboard.mode === "cut") {
       setNodeClipboard(null);
     }
-    setNotice("已粘贴为下级主题");
+    showNotice("已粘贴为下级主题");
   };
 
   const toggleSiblingCollapse = (id: string) => {
@@ -476,15 +527,22 @@ function App() {
     };
     apply(next);
     setActiveNodes(next);
-    setNotice(shouldCollapse ? "已折叠同级主题" : "已展开同级主题");
+    showNotice(shouldCollapse ? "已折叠同级主题" : "已展开同级主题");
   };
 
   const handleKeyDown = (
-    event: React.KeyboardEvent<HTMLInputElement>,
+    event: React.KeyboardEvent<HTMLTextAreaElement>,
     node: OutlineNode,
   ) => {
     if (event.nativeEvent.isComposing) return;
+    const input = event.currentTarget;
+    const { selectionStart, selectionEnd } = input;
+
     if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+      const text = input.value;
+      const cursorPos = selectionStart ?? 0;
+      if (event.key === "ArrowUp" && text.substring(0, cursorPos).includes("\n")) return;
+      if (event.key === "ArrowDown" && text.substring(cursorPos).includes("\n")) return;
       const rows = flattenNodes(visibleNodes, { respectCollapsed: true });
       const index = rows.findIndex((row) => row.node.id === node.id);
       const nextIndex = event.key === "ArrowUp" ? index - 1 : index + 1;
@@ -492,9 +550,12 @@ function App() {
       if (nextNode) {
         event.preventDefault();
         setActiveNodeId(nextNode.id);
+        const pos = event.key === "ArrowUp" ? nextNode.text.length : 0;
+        setPendingCaretFocus({ id: nextNode.id, position: pos });
       }
     }
     if (event.key === "Enter") {
+      if (event.shiftKey) return;
       event.preventDefault();
       insertAfter(node.id);
     }
@@ -506,10 +567,42 @@ function App() {
         : indentNode(activeDocument.nodes, node.id);
       setActiveNodes(next);
       setActiveNodeId(node.id);
+      const pos = selectionStart ?? 0;
+      setPendingCaretFocus({ id: node.id, position: pos });
     }
-    if (event.key === "Backspace" && !node.text && countNodes(activeDocument?.nodes ?? []) > 1) {
-      event.preventDefault();
-      removeActiveNode(node.id);
+    if ((event.metaKey || event.ctrlKey) && !event.shiftKey) {
+      if (event.key === "b") {
+        event.preventDefault();
+        if (!activeDocument) return;
+        setActiveNodes(updateNode(activeDocument.nodes, node.id, (n) => { n.bold = !n.bold; }));
+      } else if (event.key === "i") {
+        event.preventDefault();
+        if (!activeDocument) return;
+        setActiveNodes(updateNode(activeDocument.nodes, node.id, (n) => { n.italic = !n.italic; }));
+      } else if (event.key === "u") {
+        event.preventDefault();
+        if (!activeDocument) return;
+        setActiveNodes(updateNode(activeDocument.nodes, node.id, (n) => { n.underline = !n.underline; }));
+      }
+    }
+    if (event.key === "Backspace") {
+      if (selectionStart === 0 && selectionEnd === 0 && activeDocument) {
+        const rows = flattenNodes(visibleNodes, { respectCollapsed: true });
+        const index = rows.findIndex((row) => row.node.id === node.id);
+        if (index > 0) {
+          event.preventDefault();
+          const targetNode = rows[index - 1].node;
+          const originalTargetLength = targetNode.text.length;
+          const next = mergeNodes(activeDocument.nodes, node.id, targetNode.id);
+          setActiveNodes(next);
+          setActiveNodeId(targetNode.id);
+          setPendingCaretFocus({ id: targetNode.id, position: originalTargetLength });
+          if (focusNodeId === node.id) setFocusNodeId(null);
+        } else if (!node.text && countNodes(activeDocument.nodes) > 1) {
+          event.preventDefault();
+          removeActiveNode(node.id);
+        }
+      }
     }
   };
 
@@ -529,17 +622,17 @@ function App() {
     if (!activeDocument) return;
     const result = exportDocument(activeDocument, format);
     downloadText(result.filename, result.content, result.mime);
-    setNotice(`已导出 ${result.filename}`);
+    showNotice(`已导出 ${result.filename}`);
   };
 
   const exportActivePdf = async () => {
     if (!activeDocument) return;
     try {
-      setNotice("正在生成 PDF...");
+      showNotice("正在生成 PDF...");
       const filename = await exportDocumentAsPdf(activeDocument);
-      setNotice(`已下载 PDF：${filename}`);
+      showNotice(`已下载 PDF：${filename}`);
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "PDF 导出失败");
+      showNotice(error instanceof Error ? error.message : "PDF 导出失败");
     }
   };
 
@@ -547,34 +640,34 @@ function App() {
     if (!workspace) return;
     const result = exportWorkspace(workspace);
     downloadText(result.filename, result.content, result.mime);
-    setNotice(`已导出 ${result.filename}`);
+    showNotice(`已导出 ${result.filename}`);
   };
 
   const backupToCloud = async () => {
     if (!workspace) return;
     try {
       const result = await saveICloudBackup(workspace);
-      setNotice(result.ok ? `iCloud 备份已保存：${result.path}` : result.error ?? "备份失败");
+      showNotice(result.ok ? `iCloud 备份已保存：${result.path}` : result.error ?? "备份失败");
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error));
+      showNotice(error instanceof Error ? error.message : String(error));
     }
   };
 
   const loadCloudBackup = async () => {
     if (!window.localOutline) {
-      setNotice("浏览器版请用“导入”选择 iCloud Drive 里的 localoutline-workspace.json");
+      showNotice("浏览器版请用“导入”选择 iCloud Drive 里的 localoutline-workspace.json");
       return;
     }
     const result = await window.localOutline.loadICloudBackup();
     if (!result.ok || !result.payload || !("documents" in (result.payload as Workspace))) {
-      setNotice(result.error ?? "没有找到可用的 iCloud 备份");
+      showNotice(result.error ?? "没有找到可用的 iCloud 备份");
       return;
     }
-    const next = result.payload as Workspace;
+    const next = migrateWorkspace(result.payload);
     setWorkspace(next);
-    setActiveNodeId(firstNodeId(next.documents[0]?.nodes ?? []));
+    setActiveNodeId(firstNodeIdInWorkspace(next));
     setFocusNodeId(null);
-    setNotice(`已载入 iCloud 备份：${result.path}`);
+    showNotice(`已载入 iCloud 备份：${result.path}`);
   };
 
   const handleImport = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -585,8 +678,9 @@ function App() {
       const imported = importDocument(await file.text(), file.name);
       if ("documents" in imported) {
         setWorkspace(imported);
-        setActiveNodeId(firstNodeId(imported.documents[0]?.nodes ?? []));
-        setNotice(`已导入工作区：${file.name}`);
+        setActiveNodeId(firstNodeIdInWorkspace(imported));
+        setFocusNodeId(null);
+        showNotice(`已导入工作区：${file.name}`);
         return;
       }
       setFocusNodeId(null);
@@ -596,13 +690,13 @@ function App() {
         activeDocumentId: imported.id,
         documents: [imported, ...current.documents],
       }));
-      setNotice(`已导入文档：${file.name}`);
+      showNotice(`已导入文档：${file.name}`);
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "导入失败");
+      showNotice(error instanceof Error ? error.message : "导入失败");
     }
   };
 
-  const setNodeRef = (id: string, element: HTMLInputElement | null) => {
+  const setNodeRef = (id: string, element: HTMLTextAreaElement | null) => {
     if (element) {
       inputRefs.current.set(id, element);
     } else {
@@ -654,15 +748,15 @@ function App() {
         </div>
 
         <nav className="sidebar-nav" aria-label="工作区导航">
-          <button>
+          <button className={sidebarView === "recent" ? "selected" : ""} onClick={() => setSidebarView("recent")}>
             <Clock size={16} />
             最近编辑
           </button>
-          <button>
+          <button onClick={() => showNotice("快速访问功能开发中，敬请期待")}>
             <Zap size={16} />
             快速访问
           </button>
-          <button className="selected">
+          <button className={sidebarView === "all" ? "selected" : ""} onClick={() => setSidebarView("all")}>
             <FolderOpen size={16} />
             我的文档
           </button>
@@ -675,6 +769,7 @@ function App() {
               className={classNames(
                 "document-item",
                 document.id === activeDocument.id && "active",
+                sidebarView === "recent" && "show-time",
               )}
               onClick={() => selectDocument(document.id)}
             >
@@ -683,6 +778,7 @@ function App() {
               <small>{formatTime(document.updatedAt)}</small>
             </button>
           ))}
+          {matchingDocuments.length === 0 && <span className="empty-text">没有匹配的文档</span>}
         </div>
 
         <div className="sidebar-section">
@@ -705,17 +801,20 @@ function App() {
         </div>
 
         <div className="sidebar-dock">
-          <button title="本地会员功能">
+          <button title="本地会员功能" onClick={() => showNotice("会员功能开发中，敬请期待")}>
             <Star size={16} />
           </button>
-          <button title="标签">
+          <button title="标签" onClick={() => { const el = document.querySelector(".sidebar-section"); if (el) el.scrollIntoView({ behavior: "smooth" }); }}>
             <Tag size={16} />
           </button>
           <button title="iCloud 备份" onClick={backupToCloud}>
             <Cloud size={16} />
           </button>
-          <button title="回收站">
+          <button title="回收站" onClick={() => showNotice("回收站功能开发中，敬请期待")}>
             <Trash2 size={16} />
+          </button>
+          <button title={theme === "light" ? "切换到暗黑模式" : "切换到明亮模式"} onClick={() => setTheme(theme === "light" ? "dark" : "light")}>
+            {theme === "light" ? <Moon size={16} /> : <Sun size={16} />}
           </button>
         </div>
 
@@ -783,7 +882,7 @@ function App() {
             <button className="icon-button" onClick={duplicateDocument} title="复制文档">
               <Copy size={17} />
             </button>
-            <button className="icon-button danger" onClick={deleteDocument} title="删除文档">
+            <button className="icon-button danger" onClick={() => setShowConfirmDelete(true)} title="删除文档">
               <Trash2 size={17} />
             </button>
           </div>
@@ -866,6 +965,7 @@ function App() {
                 onRemove={removeActiveNode}
                 onCopyLink={copyNodeLink}
                 onExportNode={exportNodeMarkdown}
+                onUpdateNodes={setActiveNodes}
               />
             )}
 
@@ -974,6 +1074,25 @@ function App() {
         accept=".json,.md,.markdown,.opml,.xml,.mm"
         onChange={handleImport}
       />
+
+      {noticeKey > 0 && (
+        <div key={noticeKey} className="toast" onAnimationEnd={(e) => { if (e.animationName === "toast-out") setNoticeKey(0); }}>
+          <span>{notice}</span>
+        </div>
+      )}
+
+      {showConfirmDelete && (
+        <div className="confirm-overlay" onClick={() => setShowConfirmDelete(false)}>
+          <div className="confirm-dialog" onClick={(e) => e.stopPropagation()}>
+            <h3>确认删除</h3>
+            <p>确定要删除文档「{activeDocument.title}」吗？此操作不可撤销。</p>
+            <div className="confirm-actions">
+              <button className="confirm-cancel" onClick={() => setShowConfirmDelete(false)}>取消</button>
+              <button className="confirm-delete" onClick={() => { setShowConfirmDelete(false); deleteDocument(); }}>删除</button>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }
@@ -981,17 +1100,238 @@ function App() {
 interface OutlineViewProps {
   nodes: OutlineNode[];
   activeNodeId: string | null;
-  setNodeRef: (id: string, element: HTMLInputElement | null) => void;
+  setNodeRef: (id: string, element: HTMLTextAreaElement | null) => void;
   onSelect: (id: string) => void;
   onText: (id: string, text: string) => void;
-  onKeyDown: (event: React.KeyboardEvent<HTMLInputElement>, node: OutlineNode) => void;
+  onKeyDown: (event: React.KeyboardEvent<HTMLTextAreaElement>, node: OutlineNode) => void;
   onPatch: (id: string, patch: Partial<OutlineNode>) => void;
   onInsertAfter: (id: string) => void;
   onInsertChild: (id: string) => void;
   onRemove: (id: string) => void;
   onCopyLink: (id: string) => void;
   onExportNode: (id: string) => void;
+  onUpdateNodes: (nodes: OutlineNode[]) => void;
 }
+
+interface OutlineNodeRowProps {
+  node: OutlineNode;
+  depth: number;
+  isActive: boolean;
+  onSelect: (id: string) => void;
+  onText: (id: string, text: string) => void;
+  onKeyDown: (event: React.KeyboardEvent<HTMLTextAreaElement>, node: OutlineNode) => void;
+  onPatch: (id: string, patch: Partial<OutlineNode>) => void;
+  onInsertAfter: (id: string) => void;
+  onInsertChild: (id: string) => void;
+  onRemove: (id: string) => void;
+  setNodeRef: (id: string, element: HTMLTextAreaElement | null) => void;
+  onOpenMenu: (nodeId: string, rect: DOMRect) => void;
+  onDragStart: (event: React.DragEvent, id: string) => void;
+  onDragOver: (event: React.DragEvent, id: string) => void;
+  onDragEnd: (event: React.DragEvent) => void;
+  onDrop: (event: React.DragEvent, id: string) => void;
+}
+
+const OutlineNodeRow = React.memo(function OutlineNodeRow({
+  node,
+  depth,
+  isActive,
+  onSelect,
+  onText,
+  onKeyDown,
+  onPatch,
+  onInsertAfter,
+  onInsertChild,
+  onRemove,
+  setNodeRef,
+  onOpenMenu,
+  onDragStart,
+  onDragOver,
+  onDragEnd,
+  onDrop,
+}: OutlineNodeRowProps) {
+  const [localText, setLocalText] = useState(node.text);
+  const isFocusedRef = useRef(false);
+  const debounceTimerRef = useRef<number | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  const autoResize = (el: HTMLTextAreaElement | null) => {
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  };
+
+  useEffect(() => {
+    if (!isFocusedRef.current) {
+      setLocalText(node.text);
+    }
+  }, [node.text]);
+
+  useEffect(() => {
+    autoResize(textareaRef.current);
+  }, [localText]);
+
+  useEffect(() => {
+    return () => {
+      if (debounceTimerRef.current) window.clearTimeout(debounceTimerRef.current);
+    };
+  }, []);
+
+  const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const val = e.target.value;
+    setLocalText(val);
+    autoResize(e.target);
+
+    if (debounceTimerRef.current) window.clearTimeout(debounceTimerRef.current);
+    debounceTimerRef.current = window.setTimeout(() => {
+      onText(node.id, val);
+    }, 400);
+  };
+
+  const handleBlur = () => {
+    isFocusedRef.current = false;
+    if (debounceTimerRef.current) {
+      window.clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = null;
+    }
+    onText(node.id, localText);
+  };
+
+  const handleFocus = () => {
+    isFocusedRef.current = true;
+    onSelect(node.id);
+  };
+
+  const handleBulletClick = (event: React.MouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+    onSelect(node.id);
+    const rect = event.currentTarget.getBoundingClientRect();
+    onOpenMenu(node.id, rect);
+  };
+
+  const handleCheckboxToggle = (event: React.MouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+    onPatch(node.id, { checked: !node.checked });
+  };
+
+  return (
+    <div
+      className={classNames(
+        "outline-row",
+        isActive && "active",
+        `node-${normalizeColor(node.color)}`,
+        `heading-${node.headingLevel ?? 0}`,
+        node.highlight && "is-highlighted",
+      )}
+      style={{ "--depth": depth } as React.CSSProperties}
+      onClick={() => onSelect(node.id)}
+      draggable="true"
+      onDragStart={(e) => onDragStart(e, node.id)}
+      onDragOver={(e) => onDragOver(e, node.id)}
+      onDragEnd={onDragEnd}
+      onDrop={(e) => onDrop(e, node.id)}
+    >
+      <button
+        className="disclosure"
+        onClick={(event) => {
+          event.stopPropagation();
+          onPatch(node.id, { collapsed: !node.collapsed });
+        }}
+        disabled={!node.children.length}
+        title={node.collapsed ? "展开" : "折叠"}
+      >
+        {node.children.length ? (
+          node.collapsed ? (
+            <ChevronRight size={15} />
+          ) : (
+            <ChevronDown size={15} />
+          )
+        ) : (
+          <span />
+        )}
+      </button>
+
+      <button
+        className={classNames(
+          "check-button bullet-handle",
+          node.children.length > 0 && "has-children",
+          node.collapsed && "is-collapsed"
+        )}
+        onClick={handleBulletClick}
+        title="主题操作"
+      >
+        <span className="bullet-dot" />
+      </button>
+
+      {node.isTodo && (
+        <button
+          className="task-checkbox"
+          onClick={handleCheckboxToggle}
+          title={node.checked ? "设为未完成" : "设为已完成"}
+        >
+          {node.checked ? <CheckCircle2 size={16} className="checked" /> : <Circle size={16} />}
+        </button>
+      )}
+
+      <div className="outline-text-cell">
+        {node.icon && <span className="node-icon">{node.icon}</span>}
+        <textarea
+          ref={(element) => {
+            textareaRef.current = element;
+            setNodeRef(node.id, element);
+          }}
+          value={localText}
+          className={classNames(
+            node.checked && node.isTodo && "checked",
+            node.bold && "is-bold",
+            node.italic && "is-italic",
+            node.underline && "is-underline",
+            node.strike && "is-strike",
+          )}
+          rows={1}
+          onChange={handleChange}
+          onKeyDown={(event) => onKeyDown(event, node)}
+          onFocus={handleFocus}
+          onBlur={handleBlur}
+          placeholder="输入主题"
+        />
+        {node.imageName && (
+          <span className="node-attachment">
+            <Image size={13} />
+            {node.imageName}
+          </span>
+        )}
+        {node.table && (
+          <span className="node-attachment">
+            <Table size={13} />
+            表格 {node.table.length}x{node.table[0]?.length ?? 0}
+          </span>
+        )}
+      </div>
+
+      <div className="row-meta">
+        {extractTags(localText).map((tag) => (
+          <span key={tag}>#{tag}</span>
+        ))}
+        {extractLinks(localText).map((link) => (
+          <span key={link}>[[{link}]]</span>
+        ))}
+      </div>
+
+      <div className="row-actions">
+        <button onClick={() => onInsertAfter(node.id)} title="新增同级">
+          <Plus size={15} />
+        </button>
+        <button onClick={() => onInsertChild(node.id)} title="新增子级">
+          <Indent size={15} />
+        </button>
+        <button onClick={() => onRemove(node.id)} title="删除">
+          <Trash2 size={15} />
+        </button>
+      </div>
+    </div>
+  );
+});
 
 function OutlineView(props: OutlineViewProps) {
   const rows = flattenNodes(props.nodes, { respectCollapsed: true });
@@ -1001,16 +1341,26 @@ function OutlineView(props: OutlineViewProps) {
     y: number;
   } | null>(null);
 
+  const [draggedId, setDraggedId] = useState<string | null>(null);
+
   useEffect(() => {
     if (!menuState) return;
-    const close = () => setMenuState(null);
-    window.addEventListener("click", close);
-    window.addEventListener("keydown", close);
-    window.addEventListener("resize", close);
+    const handleCloseClick = (e: MouseEvent) => {
+      if ((e.target as HTMLElement).closest(".node-menu")) {
+        return;
+      }
+      setMenuState(null);
+    };
+    const handleCloseKey = () => setMenuState(null);
+    const handleResize = () => setMenuState(null);
+
+    window.addEventListener("click", handleCloseClick);
+    window.addEventListener("keydown", handleCloseKey);
+    window.addEventListener("resize", handleResize);
     return () => {
-      window.removeEventListener("click", close);
-      window.removeEventListener("keydown", close);
-      window.removeEventListener("resize", close);
+      window.removeEventListener("click", handleCloseClick);
+      window.removeEventListener("keydown", handleCloseKey);
+      window.removeEventListener("resize", handleResize);
     };
   }, [menuState]);
 
@@ -1025,110 +1375,78 @@ function OutlineView(props: OutlineViewProps) {
     closeMenu();
   };
 
+  const handleOpenMenu = (nodeId: string, rect: DOMRect) => {
+    setMenuState({
+      nodeId,
+      x: rect.left + rect.width / 2,
+      y: rect.bottom + 8,
+    });
+  };
+
+  const handleDragStart = (e: React.DragEvent, id: string) => {
+    setDraggedId(id);
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", id);
+  };
+
+  const handleDragOver = (e: React.DragEvent, id: string) => {
+    if (draggedId === id) return;
+    const sourceNode = findNode(props.nodes, draggedId || "");
+    if (sourceNode && findNode(sourceNode.children, id)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+  };
+
+  const handleDragEnd = () => {
+    setDraggedId(null);
+  };
+
+  const handleDrop = (e: React.DragEvent, targetId: string) => {
+    e.preventDefault();
+    const sourceId = e.dataTransfer.getData("text/plain") || draggedId;
+    if (!sourceId || sourceId === targetId) return;
+
+    const sourceNode = findNode(props.nodes, sourceId);
+    if (!sourceNode) return;
+
+    if (findNode(sourceNode.children, targetId)) return;
+
+    const rect = e.currentTarget.getBoundingClientRect();
+    const relativeY = e.clientY - rect.top;
+    const isLowerHalf = relativeY > rect.height / 2;
+
+    let next = removeNode(props.nodes, sourceId);
+    if (isLowerHalf) {
+      next = addChild(next, targetId, sourceNode);
+    } else {
+      next = insertSiblingAfter(next, targetId, sourceNode);
+    }
+    props.onUpdateNodes(next);
+    setDraggedId(null);
+  };
+
   return (
     <div className="outline-list">
       {rows.map(({ node, depth }) => (
-        <div
+        <OutlineNodeRow
           key={node.id}
-          className={classNames(
-            "outline-row",
-            props.activeNodeId === node.id && "active",
-            `node-${normalizeColor(node.color)}`,
-            `heading-${node.headingLevel ?? 0}`,
-            node.highlight && "is-highlighted",
-          )}
-          style={{ "--depth": depth } as React.CSSProperties}
-          onClick={() => props.onSelect(node.id)}
-        >
-          <button
-            className="disclosure"
-            onClick={(event) => {
-              event.stopPropagation();
-              props.onPatch(node.id, { collapsed: !node.collapsed });
-            }}
-            disabled={!node.children.length}
-            title={node.collapsed ? "展开" : "折叠"}
-          >
-            {node.children.length ? (
-              node.collapsed ? (
-                <ChevronRight size={15} />
-              ) : (
-                <ChevronDown size={15} />
-              )
-            ) : (
-              <span />
-            )}
-          </button>
-
-          <button
-            className="check-button"
-            onClick={(event) => {
-              event.stopPropagation();
-              props.onSelect(node.id);
-              const rect = event.currentTarget.getBoundingClientRect();
-              setMenuState({
-                nodeId: node.id,
-                x: rect.left + rect.width / 2,
-                y: rect.bottom + 8,
-              });
-            }}
-            title="主题操作"
-          >
-            {node.checked ? <CheckCircle2 size={17} /> : <Circle size={17} />}
-          </button>
-
-          <div className="outline-text-cell">
-            {node.icon && <span className="node-icon">{node.icon}</span>}
-            <input
-              ref={(element) => props.setNodeRef(node.id, element)}
-              value={node.text}
-              className={classNames(
-                node.checked && "checked",
-                node.bold && "is-bold",
-                node.italic && "is-italic",
-                node.underline && "is-underline",
-                node.strike && "is-strike",
-              )}
-              onChange={(event) => props.onText(node.id, event.target.value)}
-              onKeyDown={(event) => props.onKeyDown(event, node)}
-              onFocus={() => props.onSelect(node.id)}
-              placeholder="输入主题"
-            />
-            {node.imageName && (
-              <span className="node-attachment">
-                <Image size={13} />
-                {node.imageName}
-              </span>
-            )}
-            {node.table && (
-              <span className="node-attachment">
-                <Table size={13} />
-                表格 {node.table.length}x{node.table[0]?.length ?? 0}
-              </span>
-            )}
-          </div>
-
-          <div className="row-meta">
-            {extractTags(node.text).map((tag) => (
-              <span key={tag}>#{tag}</span>
-            ))}
-            {extractLinks(node.text).map((link) => (
-              <span key={link}>[[{link}]]</span>
-            ))}
-          </div>
-
-          <div className="row-actions">
-            <button onClick={() => props.onInsertAfter(node.id)} title="新增同级">
-              <Plus size={15} />
-            </button>
-            <button onClick={() => props.onInsertChild(node.id)} title="新增子级">
-              <Indent size={15} />
-            </button>
-            <button onClick={() => props.onRemove(node.id)} title="删除">
-              <Trash2 size={15} />
-            </button>
-          </div>
-        </div>
+          node={node}
+          depth={depth}
+          isActive={props.activeNodeId === node.id}
+          onSelect={props.onSelect}
+          onText={props.onText}
+          onKeyDown={props.onKeyDown}
+          onPatch={props.onPatch}
+          onInsertAfter={props.onInsertAfter}
+          onInsertChild={props.onInsertChild}
+          onRemove={props.onRemove}
+          setNodeRef={props.setNodeRef}
+          onOpenMenu={handleOpenMenu}
+          onDragStart={handleDragStart}
+          onDragOver={handleDragOver}
+          onDragEnd={handleDragEnd}
+          onDrop={handleDrop}
+        />
       ))}
       {menuState && menuNode && (
         <NodeMenu
@@ -1299,9 +1617,9 @@ function NodeMenu({
           <Image size={19} />
           <span>{node.imageName ? "移除图片" : "添加图片"}</span>
         </button>
-        <button className="node-menu-row" onClick={() => onPatch({ checked: !node.checked })}>
+        <button className="node-menu-row" onClick={() => onPatch({ isTodo: !node.isTodo })}>
           <CheckCircle2 size={19} />
-          <span>{node.checked ? "取消待办" : "添加待办"}</span>
+          <span>{node.isTodo ? "转化为普通文本" : "转化为待办任务"}</span>
         </button>
         <button className="node-menu-row" onClick={() => onPatch({ icon: nextIcon })}>
           <Smile size={19} />
@@ -1443,14 +1761,22 @@ function MindMap({
 
   useEffect(() => {
     if (!contextMenu) return;
-    const close = () => setContextMenu(null);
-    window.addEventListener("click", close);
-    window.addEventListener("keydown", close);
-    window.addEventListener("resize", close);
+    const handleCloseClick = (e: MouseEvent) => {
+      if ((e.target as HTMLElement).closest(".mindmap-context-menu")) {
+        return;
+      }
+      setContextMenu(null);
+    };
+    const handleCloseKey = () => setContextMenu(null);
+    const handleResize = () => setContextMenu(null);
+
+    window.addEventListener("click", handleCloseClick);
+    window.addEventListener("keydown", handleCloseKey);
+    window.addEventListener("resize", handleResize);
     return () => {
-      window.removeEventListener("click", close);
-      window.removeEventListener("keydown", close);
-      window.removeEventListener("resize", close);
+      window.removeEventListener("click", handleCloseClick);
+      window.removeEventListener("keydown", handleCloseKey);
+      window.removeEventListener("resize", handleResize);
     };
   }, [contextMenu]);
 
@@ -1468,6 +1794,72 @@ function MindMap({
         y: anchorY - contentY * scale,
       };
     });
+  };
+
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (editingNodeId) return;
+    if (!activeNodeId) return;
+
+    const currentItem = layout.items.find((item) => item.node.id === activeNodeId);
+    if (!currentItem) return;
+
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      const sameDepth = layout.items.filter(
+        (item) => item.depth === currentItem.depth && item.node.id !== activeNodeId
+      );
+      const above = sameDepth
+        .filter((item) => item.y < currentItem.y)
+        .sort((a, b) => b.y - a.y)[0];
+      if (above) {
+        onSelect(above.node.id);
+      }
+    } else if (event.key === "ArrowDown") {
+      event.preventDefault();
+      const sameDepth = layout.items.filter(
+        (item) => item.depth === currentItem.depth && item.node.id !== activeNodeId
+      );
+      const below = sameDepth
+        .filter((item) => item.y > currentItem.y)
+        .sort((a, b) => a.y - b.y)[0];
+      if (below) {
+        onSelect(below.node.id);
+      }
+    } else if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      if (currentItem.parentId) {
+        onSelect(currentItem.parentId);
+      }
+    } else if (event.key === "ArrowRight") {
+      event.preventDefault();
+      if (!currentItem.node.collapsed && currentItem.node.children.length > 0) {
+        onSelect(currentItem.node.children[0].id);
+      }
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      if (!isRootNode(activeNodeId)) {
+        onInsertAfter(activeNodeId);
+      } else {
+        onInsertChild(activeNodeId);
+      }
+    } else if (event.key === "Tab") {
+      event.preventDefault();
+      if (event.shiftKey) {
+        if (!isRootNode(activeNodeId)) {
+          onInsertParent(activeNodeId);
+        }
+      } else {
+        onInsertChild(activeNodeId);
+      }
+    } else if (event.key === "Spacebar" || event.key === " ") {
+      event.preventDefault();
+      setEditingNodeId(activeNodeId);
+    } else if (event.key === "Delete" || event.key === "Backspace") {
+      event.preventDefault();
+      if (!isRootNode(activeNodeId)) {
+        onRemove(activeNodeId);
+      }
+    }
   };
 
   const handleWheel = (event: React.WheelEvent<HTMLDivElement>) => {
@@ -1491,6 +1883,7 @@ function MindMap({
 
   const startPan = (event: React.PointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
+    if ((event.target as HTMLElement).closest(".mindmap-context-menu")) return;
     dragRef.current = {
       pointerId: event.pointerId,
       startX: event.clientX,
@@ -1553,12 +1946,14 @@ function MindMap({
   return (
     <div
       ref={viewportRef}
+      tabIndex={0}
       className={classNames("mindmap-scroll", dragging && "dragging")}
       onWheel={handleWheel}
       onPointerDown={startPan}
       onPointerMove={pan}
       onPointerUp={endPan}
       onPointerCancel={endPan}
+      onKeyDown={handleKeyDown}
     >
       <div className="mindmap-controls" onPointerDown={(event) => event.stopPropagation()}>
         <button onClick={() => zoomBy(1.18)} title="放大">
@@ -1595,6 +1990,7 @@ function MindMap({
           {layout.edges.map((edge) => (
             <path
               key={`${edge.from.node.id}-${edge.to.node.id}`}
+              className={classNames("mindmap-edge", `edge-${normalizeColor(edge.to.node.color)}`)}
               d={`M ${edge.from.x + edge.from.width} ${edge.from.y + edge.from.height / 2} C ${
                 edge.from.x + edge.from.width + 52
               } ${edge.from.y + edge.from.height / 2}, ${edge.to.x - 52} ${
@@ -1665,19 +2061,17 @@ function MindMap({
                       }}
                       onBlur={() => setEditingNodeId(null)}
                     />
-                    {!isRootNode(item.node.id) && (
-                      <button
-                        className="map-node-add"
-                        title="新增下级主题"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          onInsertChild(item.node.id);
-                        }}
-                        onPointerDown={(event) => event.stopPropagation()}
-                      >
-                        <Plus size={18} />
-                      </button>
-                    )}
+                    <button
+                      className="map-node-add"
+                      title="新增下级主题"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onInsertChild(item.node.id);
+                      }}
+                      onPointerDown={(event) => event.stopPropagation()}
+                    >
+                      <Plus size={18} />
+                    </button>
                   </div>
                 ) : (
                   <span className="map-node-lines">
@@ -1703,7 +2097,7 @@ function MindMap({
             setContextMenu(null);
           }}
           onInsertChild={() => {
-            if (!isRootNode(contextItem.node.id)) onInsertChild(contextItem.node.id);
+            onInsertChild(contextItem.node.id);
             setContextMenu(null);
           }}
           onInsertParent={() => {
@@ -1723,7 +2117,7 @@ function MindMap({
             setContextMenu(null);
           }}
           onPaste={() => {
-            if (!isRootNode(contextItem.node.id)) onPasteNode(contextItem.node.id);
+            onPasteNode(contextItem.node.id);
             setContextMenu(null);
           }}
           canPaste={canPaste}
@@ -1803,13 +2197,14 @@ function MindMapContextMenu({
       className="mindmap-context-menu"
       style={{ left: x, top: y } as React.CSSProperties}
       onClick={(event) => event.stopPropagation()}
+      onPointerDown={(event) => event.stopPropagation()}
       onContextMenu={(event) => event.preventDefault()}
     >
       <button disabled={isRoot} onClick={onInsertAfter}>
         <span>插入同级主题</span>
         <kbd>Enter</kbd>
       </button>
-      <button disabled={isRoot} onClick={onInsertChild}>
+      <button onClick={onInsertChild}>
         <span>插入下级主题</span>
         <kbd>Tab</kbd>
       </button>
@@ -1828,7 +2223,7 @@ function MindMapContextMenu({
         <span>剪切</span>
         <kbd>⌘ + X</kbd>
       </button>
-      <button disabled={isRoot || !canPaste} onClick={onPaste}>
+      <button disabled={!canPaste} onClick={onPaste}>
         <span>粘贴</span>
         <kbd>⌘ + V</kbd>
       </button>
@@ -1931,22 +2326,158 @@ interface PresentationViewProps {
 }
 
 function PresentationView({ title, nodes, onSelect }: PresentationViewProps) {
-  const rows = flattenNodes(nodes, { respectCollapsed: true });
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [currentSlide, setCurrentSlide] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const playTimerRef = useRef<number | null>(null);
+
+  const slides = useMemo(() => {
+    const list: Array<{ title: string; subtitle?: string; note?: string; points: OutlineNode[] }> = [];
+    
+    // Slide 0: Cover
+    list.push({
+      title,
+      subtitle: "演示文稿",
+      points: [],
+    });
+
+    // Top level nodes are slides
+    nodes.forEach((node) => {
+      list.push({
+        title: node.text || "未命名主题",
+        note: node.note,
+        points: node.children,
+      });
+    });
+
+    return list;
+  }, [nodes, title]);
+
+  useEffect(() => {
+    if (currentSlide >= slides.length) {
+      setCurrentSlide(0);
+    }
+  }, [slides.length, currentSlide]);
+
+  const nextSlide = () => {
+    setCurrentSlide((prev) => (prev < slides.length - 1 ? prev + 1 : 0));
+  };
+
+  const prevSlide = () => {
+    setCurrentSlide((prev) => (prev > 0 ? prev - 1 : slides.length - 1));
+  };
+
+  // Keyboard navigation
+  useEffect(() => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "ArrowRight" || e.key === "Space" || e.key === " ") {
+        e.preventDefault();
+        setCurrentSlide((prev) => (prev < slides.length - 1 ? prev + 1 : 0));
+      } else if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        setCurrentSlide((prev) => (prev > 0 ? prev - 1 : slides.length - 1));
+      }
+    };
+    window.addEventListener("keydown", handleGlobalKeyDown);
+    return () => window.removeEventListener("keydown", handleGlobalKeyDown);
+  }, [slides.length]);
+
+  // Autoplay
+  useEffect(() => {
+    if (isPlaying) {
+      playTimerRef.current = window.setInterval(() => {
+        setCurrentSlide((prev) => (prev < slides.length - 1 ? prev + 1 : 0));
+      }, 4000);
+    } else {
+      if (playTimerRef.current) {
+        window.clearInterval(playTimerRef.current);
+        playTimerRef.current = null;
+      }
+    }
+    return () => {
+      if (playTimerRef.current) window.clearInterval(playTimerRef.current);
+    };
+  }, [isPlaying, slides.length]);
+
+  const toggleFullscreen = () => {
+    if (!containerRef.current) return;
+    if (!document.fullscreenElement) {
+      void containerRef.current.requestFullscreen().catch((err) => {
+        console.error("Error attempting to enable fullscreen:", err);
+      });
+    } else {
+      void document.exitFullscreen();
+    }
+  };
+
+  const activeSlide = slides[currentSlide] || slides[0];
+
   return (
-    <div className="presentation-view">
-      <h1>{title}</h1>
-      <div className="slide-outline">
-        {rows.map((row) => (
-          <button
-            key={row.node.id}
-            style={{ "--depth": row.depth } as React.CSSProperties}
-            onClick={() => onSelect(row.node.id)}
-            className={row.node.checked ? "checked" : ""}
-          >
-            <span>{row.node.text || "未命名主题"}</span>
-            {row.node.note && <small>{row.node.note}</small>}
-          </button>
-        ))}
+    <div ref={containerRef} className="presentation-view">
+      <div className="slide-deck">
+        <div key={currentSlide} className="slide-card">
+          {currentSlide === 0 ? (
+            <div className="slide-cover">
+              <div className="slide-subtitle">{activeSlide.subtitle}</div>
+              <h1>{activeSlide.title}</h1>
+              <div className="slide-stats">{nodes.length} 个主要章节</div>
+            </div>
+          ) : (
+            <div className="slide-content">
+              <h2 className="slide-title">{activeSlide.title}</h2>
+              {activeSlide.note && (
+                <blockquote className="slide-note">
+                  {activeSlide.note}
+                </blockquote>
+              )}
+              <div className="slide-body">
+                {activeSlide.points.map((point) => (
+                  <div key={point.id} className="slide-point-container">
+                    <div className="slide-point">
+                      <span className="slide-point-bullet">•</span>
+                      <span>{point.text || "未命名子项"}</span>
+                    </div>
+                    {point.children && point.children.length > 0 && (
+                      <div className="slide-point-nested">
+                        {point.children.map((subpoint) => (
+                          <div key={subpoint.id} className="slide-point-nested-item">
+                            <span className="slide-point-nested-bullet">-</span>
+                            <span>{subpoint.text || "未命名孙项"}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+                {activeSlide.points.length === 0 && (
+                  <p className="empty-text">无详细内容</p>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="slide-controls">
+        <button className="slide-btn" onClick={prevSlide} title="上一页">
+          <ChevronLeft size={20} />
+        </button>
+        <div className="slide-indicator">
+          {currentSlide + 1} / {slides.length}
+        </div>
+        <button className="slide-btn" onClick={nextSlide} title="下一页">
+          <ChevronRight size={20} />
+        </button>
+        <button
+          className="slide-btn"
+          onClick={() => setIsPlaying(!isPlaying)}
+          title={isPlaying ? "暂停自动播放" : "开启自动播放"}
+        >
+          {isPlaying ? <Pause size={20} /> : <Play size={20} />}
+        </button>
+        <button className="slide-btn" onClick={toggleFullscreen} title="全屏演示">
+          <Maximize2 size={20} />
+        </button>
       </div>
     </div>
   );

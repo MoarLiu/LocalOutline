@@ -1,5 +1,6 @@
 import type { PDFFont, PDFPage, RGB } from "pdf-lib";
 import type { OutlineDocument, OutlineNode, Workspace } from "./types";
+import { migrateDocument, migrateWorkspace } from "./migrations";
 import { createNode } from "./tree";
 import pdfFontUrl from "./assets/ArialUnicode.ttf?url";
 
@@ -513,8 +514,12 @@ export const importDocument = (content: string, filename: string): OutlineDocume
 
   if (lowerFilename.endsWith(".json")) {
     const parsed = JSON.parse(content) as Workspace | OutlineDocument;
-    if ("documents" in parsed) return parsed;
-    return { ...parsed, id: parsed.id || crypto.randomUUID(), updatedAt: now };
+    if ("documents" in parsed) return migrateWorkspace(parsed);
+    return migrateDocument({
+      ...parsed,
+      id: crypto.randomUUID(),
+      updatedAt: now,
+    });
   }
 
   if (/\.(md|markdown)$/i.test(filename)) {

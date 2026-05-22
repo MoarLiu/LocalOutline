@@ -1,4 +1,5 @@
 import type { Workspace } from "./types";
+import { migrateWorkspace } from "./migrations";
 
 const DB_NAME = "local-outline-db";
 const STORE_NAME = "workspace-store";
@@ -25,12 +26,22 @@ export const loadWorkspace = async (): Promise<Workspace | null> => {
       const tx = db.transaction(STORE_NAME, "readonly");
       const store = tx.objectStore(STORE_NAME);
       const request = store.get(WORKSPACE_KEY);
-      request.onsuccess = () => resolve((request.result as Workspace) ?? null);
+      request.onsuccess = () => {
+        try {
+          resolve(request.result ? migrateWorkspace(request.result) : null);
+        } catch (error) {
+          reject(error);
+        }
+      };
       request.onerror = () => reject(request.error);
     });
   } catch {
-    const raw = localStorage.getItem(FALLBACK_KEY);
-    return raw ? (JSON.parse(raw) as Workspace) : null;
+    try {
+      const raw = localStorage.getItem(FALLBACK_KEY);
+      return raw ? migrateWorkspace(JSON.parse(raw)) : null;
+    } catch {
+      return null;
+    }
   }
 };
 

@@ -16,6 +16,7 @@ export interface OutlineNode {
   icon?: string;
   imageName?: string;
   table?: string[][];
+  isTodo?: boolean;
   children: OutlineNode[];
 }
 

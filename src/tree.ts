@@ -74,37 +74,82 @@ export const updateNode = (
   id: string,
   updater: (node: OutlineNode) => void,
 ): OutlineNode[] => {
-  const next = cloneNodes(nodes);
-  const located = locateNode(next, id);
-  if (!located) return nodes;
-  updater(located.node);
-  return next;
+  return nodes.map((node) => {
+    if (node.id === id) {
+      const updated = { ...node };
+      updater(updated);
+      return updated;
+    }
+    if (node.children && node.children.length > 0) {
+      const nextChildren = updateNode(node.children, id, updater);
+      if (nextChildren !== node.children) {
+        return { ...node, children: nextChildren };
+      }
+    }
+    return node;
+  });
 };
 
 export const insertSiblingAfter = (
   nodes: OutlineNode[],
   targetId: string,
-  node: OutlineNode,
+  newNode: OutlineNode,
 ): OutlineNode[] => {
-  const next = cloneNodes(nodes);
-  const located = locateNode(next, targetId);
-  if (!located) return [...next, node];
-  const siblings = siblingsAtPath(next, located.path);
-  siblings.splice(located.path[located.path.length - 1] + 1, 0, node);
-  return next;
+  const index = nodes.findIndex((n) => n.id === targetId);
+  if (index !== -1) {
+    const next = [...nodes];
+    next.splice(index + 1, 0, newNode);
+    return next;
+  }
+  return nodes.map((node) => {
+    if (node.children && node.children.length > 0) {
+      const nextChildren = insertSiblingAfter(node.children, targetId, newNode);
+      if (nextChildren !== node.children) {
+        return { ...node, children: nextChildren };
+      }
+    }
+    return node;
+  });
 };
 
 export const addChild = (
   nodes: OutlineNode[],
   targetId: string,
-  child: OutlineNode,
+  childNode: OutlineNode,
 ): OutlineNode[] => {
-  const next = cloneNodes(nodes);
-  const located = locateNode(next, targetId);
-  if (!located) return next;
-  located.node.children.push(child);
-  located.node.collapsed = false;
-  return next;
+  return nodes.map((node) => {
+    if (node.id === targetId) {
+      return {
+        ...node,
+        collapsed: false,
+        children: [...node.children, childNode],
+      };
+    }
+    if (node.children && node.children.length > 0) {
+      const nextChildren = addChild(node.children, targetId, childNode);
+      if (nextChildren !== node.children) {
+        return { ...node, children: nextChildren };
+      }
+    }
+    return node;
+  });
+};
+
+export const findParentNodeId = (
+  nodes: OutlineNode[],
+  targetId: string,
+  currentParentId: string | null = null,
+): string | null => {
+  for (const node of nodes) {
+    if (node.id === targetId) {
+      return currentParentId;
+    }
+    if (node.children && node.children.length > 0) {
+      const found = findParentNodeId(node.children, targetId, node.id);
+      if (found !== null) return found;
+    }
+  }
+  return null;
 };
 
 export const insertParent = (
@@ -112,62 +157,106 @@ export const insertParent = (
   targetId: string,
   parent: OutlineNode,
 ): OutlineNode[] => {
-  const next = cloneNodes(nodes);
-  const located = locateNode(next, targetId);
-  if (!located) return next;
-  const siblings = siblingsAtPath(next, located.path);
-  const index = located.path[located.path.length - 1];
-  const [node] = siblings.splice(index, 1);
-  parent.children = [node];
-  parent.collapsed = false;
-  siblings.splice(index, 0, parent);
-  return next;
+  const parentId = findParentNodeId(nodes, targetId);
+  if (parentId) {
+    return insertSiblingAfter(nodes, parentId, parent);
+  }
+  // If target is a top-level node, insert as its sibling
+  return insertSiblingAfter(nodes, targetId, parent);
 };
 
 export const removeNode = (
   nodes: OutlineNode[],
   targetId: string,
 ): OutlineNode[] => {
-  const next = cloneNodes(nodes);
-  const located = locateNode(next, targetId);
-  if (!located) return nodes;
-  const siblings = siblingsAtPath(next, located.path);
-  siblings.splice(located.path[located.path.length - 1], 1);
-  return next.length ? next : [createNode("新主题")];
+  const index = nodes.findIndex((n) => n.id === targetId);
+  if (index !== -1) {
+    const next = [...nodes];
+    next.splice(index, 1);
+    return next.length ? next : [createNode("新主题")];
+  }
+  const nextList = nodes.map((node) => {
+    if (node.children && node.children.length > 0) {
+      const nextChildren = removeNode(node.children, targetId);
+      if (nextChildren !== node.children) {
+        return { ...node, children: nextChildren };
+      }
+    }
+    return node;
+  });
+  return nextList;
 };
 
 export const indentNode = (
   nodes: OutlineNode[],
   targetId: string,
 ): OutlineNode[] => {
-  const next = cloneNodes(nodes);
-  const located = locateNode(next, targetId);
-  if (!located) return nodes;
-  const index = located.path[located.path.length - 1];
-  if (index === 0) return nodes;
-  const siblings = siblingsAtPath(next, located.path);
-  const [node] = siblings.splice(index, 1);
-  const previous = siblings[index - 1];
-  previous.children.push(node);
-  previous.collapsed = false;
-  return next;
+  const index = nodes.findIndex((n) => n.id === targetId);
+  if (index !== -1) {
+    if (index === 0) return nodes;
+    const previous = nodes[index - 1];
+    const target = nodes[index];
+    const nextPrevious = {
+      ...previous,
+      collapsed: false,
+      children: [...previous.children, target],
+    };
+    const next = [...nodes];
+    next.splice(index - 1, 2, nextPrevious);
+    return next;
+  }
+  return nodes.map((node) => {
+    if (node.children && node.children.length > 0) {
+      const nextChildren = indentNode(node.children, targetId);
+      if (nextChildren !== node.children) {
+        return { ...node, children: nextChildren };
+      }
+    }
+    return node;
+  });
 };
 
 export const outdentNode = (
   nodes: OutlineNode[],
   targetId: string,
 ): OutlineNode[] => {
-  const next = cloneNodes(nodes);
-  const located = locateNode(next, targetId);
-  if (!located || located.path.length < 2) return nodes;
-  const childSiblings = siblingsAtPath(next, located.path);
-  const childIndex = located.path[located.path.length - 1];
-  const [node] = childSiblings.splice(childIndex, 1);
-  const parentPath = located.path.slice(0, -1);
-  const parentIndex = parentPath[parentPath.length - 1];
-  const parentSiblings = siblingsAtPath(next, parentPath);
-  parentSiblings.splice(parentIndex + 1, 0, node);
-  return next;
+  const recurse = (
+    list: OutlineNode[],
+  ): { newNodes: OutlineNode[]; outdentedNode: OutlineNode | null } => {
+    for (let i = 0; i < list.length; i++) {
+      const node = list[i];
+      const childIndex = node.children.findIndex((c) => c.id === targetId);
+      if (childIndex !== -1) {
+        const targetNode = node.children[childIndex];
+        const nextChildren = [...node.children];
+        nextChildren.splice(childIndex, 1);
+        const nextNode = { ...node, children: nextChildren };
+        
+        const nextList = [...list];
+        nextList.splice(i, 1, nextNode);
+        nextList.splice(i + 1, 0, targetNode);
+        return { newNodes: nextList, outdentedNode: targetNode };
+      }
+    }
+    
+    for (let i = 0; i < list.length; i++) {
+      const node = list[i];
+      if (node.children && node.children.length > 0) {
+        const { newNodes: nextChildren, outdentedNode } = recurse(node.children);
+        if (nextChildren !== node.children) {
+          const nextNode = { ...node, children: nextChildren };
+          const nextList = [...list];
+          nextList.splice(i, 1, nextNode);
+          return { newNodes: nextList, outdentedNode };
+        }
+      }
+    }
+    
+    return { newNodes: list, outdentedNode: null };
+  };
+
+  const { newNodes } = recurse(nodes);
+  return newNodes;
 };
 
 export const moveNode = (
@@ -175,16 +264,38 @@ export const moveNode = (
   targetId: string,
   direction: -1 | 1,
 ): OutlineNode[] => {
-  const next = cloneNodes(nodes);
-  const located = locateNode(next, targetId);
-  if (!located) return nodes;
-  const siblings = siblingsAtPath(next, located.path);
-  const index = located.path[located.path.length - 1];
-  const targetIndex = index + direction;
-  if (targetIndex < 0 || targetIndex >= siblings.length) return nodes;
-  const [node] = siblings.splice(index, 1);
-  siblings.splice(targetIndex, 0, node);
-  return next;
+  const index = nodes.findIndex((n) => n.id === targetId);
+  if (index !== -1) {
+    const targetIndex = index + direction;
+    if (targetIndex < 0 || targetIndex >= nodes.length) return nodes;
+    const next = [...nodes];
+    const [node] = next.splice(index, 1);
+    next.splice(targetIndex, 0, node);
+    return next;
+  }
+  return nodes.map((node) => {
+    if (node.children && node.children.length > 0) {
+      const nextChildren = moveNode(node.children, targetId, direction);
+      if (nextChildren !== node.children) {
+        return { ...node, children: nextChildren };
+      }
+    }
+    return node;
+  });
+};
+
+export const mergeNodes = (
+  nodes: OutlineNode[],
+  sourceId: string,
+  targetId: string,
+): OutlineNode[] => {
+  const sourceNode = findNode(nodes, sourceId);
+  if (!sourceNode) return nodes;
+  const nextWithoutSource = removeNode(nodes, sourceId);
+  return updateNode(nextWithoutSource, targetId, (node) => {
+    node.text = (node.text || "") + (sourceNode.text || "");
+    node.children = [...(node.children || []), ...(sourceNode.children || [])];
+  });
 };
 
 export const flattenNodes = (

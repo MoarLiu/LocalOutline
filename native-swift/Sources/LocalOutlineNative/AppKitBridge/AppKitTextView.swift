@@ -3,6 +3,9 @@ import SwiftUI
 
 struct AppKitTextView: NSViewRepresentable {
     @Binding var text: String
+    var forceRefreshToken: Int = 0
+    var onUndoShortcut: (() -> Void)?
+    var onEditingEnded: (() -> Void)?
 
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSScrollView()
@@ -13,7 +16,8 @@ struct AppKitTextView: NSViewRepresentable {
         scroll.backgroundColor = .textBackgroundColor
         scroll.autohidesScrollers = true
 
-        let textView = NSTextView()
+        let textView = PlainTextView()
+        textView.onUndoShortcut = onUndoShortcut
         textView.isRichText = false
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
@@ -36,25 +40,47 @@ struct AppKitTextView: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: NSScrollView, context: Context) {
+        context.coordinator.forceRefreshToken = forceRefreshToken
+        context.coordinator.onEditingEnded = onEditingEnded
+        if let plainTextView = nsView.documentView as? PlainTextView {
+            plainTextView.onUndoShortcut = onUndoShortcut
+        }
         guard
             let textView = nsView.documentView as? NSTextView,
-            textView.string != text,
-            !context.coordinator.isEditing
+            textView.string != text
         else { return }
 
+        if context.coordinator.isEditing, !context.coordinator.shouldForceRefresh(for: forceRefreshToken) {
+            return
+        }
+        context.coordinator.isApplyingExternalText = true
         textView.string = text
+        context.coordinator.isApplyingExternalText = false
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(text: $text)
+        Coordinator(text: $text, forceRefreshToken: forceRefreshToken, onEditingEnded: onEditingEnded)
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
         @Binding var text: String
         var isEditing = false
+        var isApplyingExternalText = false
+        var forceRefreshToken: Int
+        var onEditingEnded: (() -> Void)?
+        private var lastAppliedRefreshToken: Int
 
-        init(text: Binding<String>) {
+        init(text: Binding<String>, forceRefreshToken: Int, onEditingEnded: (() -> Void)?) {
             _text = text
+            self.forceRefreshToken = forceRefreshToken
+            self.onEditingEnded = onEditingEnded
+            lastAppliedRefreshToken = forceRefreshToken
+        }
+
+        func shouldForceRefresh(for token: Int) -> Bool {
+            guard token != lastAppliedRefreshToken else { return false }
+            lastAppliedRefreshToken = token
+            return true
         }
 
         func textDidBeginEditing(_ notification: Notification) {
@@ -63,11 +89,26 @@ struct AppKitTextView: NSViewRepresentable {
 
         func textDidEndEditing(_ notification: Notification) {
             isEditing = false
+            onEditingEnded?()
         }
 
         func textDidChange(_ notification: Notification) {
             guard let view = notification.object as? NSTextView else { return }
+            guard !isApplyingExternalText else { return }
             text = view.string
         }
+    }
+}
+
+final class PlainTextView: NSTextView {
+    var onUndoShortcut: (() -> Void)?
+
+    override func keyDown(with event: NSEvent) {
+        let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        if event.charactersIgnoringModifiers?.lowercased() == "z", modifiers == .command {
+            onUndoShortcut?()
+            return
+        }
+        super.keyDown(with: event)
     }
 }

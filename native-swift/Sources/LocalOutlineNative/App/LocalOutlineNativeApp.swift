@@ -22,13 +22,17 @@ struct LocalOutlineNativeApp: App {
             ContentView()
                 .environmentObject(store)
                 .frame(minWidth: 980, minHeight: 640)
-                .preferredColorScheme(store.useDarkMode ? .dark : nil)
+                .preferredColorScheme(store.useDarkMode ? .dark : .light)
                 .onAppear { store.load() }
         }
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button("新建文档") { store.createDocument() }
                     .keyboardShortcut("n", modifiers: [.command])
+            }
+            CommandGroup(replacing: .undoRedo) {
+                Button("撤销") { store.undoDocumentCommand() }
+                    .keyboardShortcut("z", modifiers: [.command])
             }
             CommandMenu("Local Outline") {
                 Button("保存") { store.flushSaveNow() }
@@ -65,6 +69,7 @@ struct LocalOutlineNativeApp: App {
         Settings {
             SettingsView()
                 .environmentObject(store)
+                .preferredColorScheme(store.useDarkMode ? .dark : .light)
         }
     }
 }

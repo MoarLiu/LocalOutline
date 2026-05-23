@@ -85,7 +85,7 @@ struct SidebarView: View {
             HStack(spacing: 12) {
                 Button { store.backupToICloud() } label: { Image(systemName: "icloud") }
                     .help("备份当前数据到 iCloud")
-                Button { store.useDarkMode.toggle() } label: { Image(systemName: store.useDarkMode ? "sun.max" : "moon") }
+                Button { store.toggleDarkMode() } label: { Image(systemName: store.useDarkMode ? "sun.max" : "moon") }
                     .help(store.useDarkMode ? "切换到明亮模式" : "切换到暗黑模式")
                 Button { ICloudBackupService.openDirectoryInFinder() } label: { Image(systemName: "folder") }
                     .help("在 Finder 中打开 iCloud 备份目录")

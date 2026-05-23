@@ -17,7 +17,8 @@ let package = Package(
             path: "Sources/LocalOutlineNative",
             exclude: [
                 "Resources/Info.plist",
-                "Resources/LocalOutlineNative.entitlements"
+                "Resources/LocalOutlineNative.entitlements",
+                "Resources/AppIcon.icns"
             ],
             swiftSettings: [
                 .define("LOCAL_OUTLINE_CLI_BUILD")

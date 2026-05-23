@@ -18,6 +18,7 @@ enum SelfTestRunner {
         try markdownRoundTripPreservesTitleAndTasks()
         try jsonWorkspaceCompatibility()
         try tagAndLinkExtraction()
+        try documentUndoWorksAcrossOutlineMindMapAndMarkdown()
         try repositorySavesSnapshotsAndRestores()
         try iCloudBackupWritesLatestAndStampedFiles()
     }
@@ -71,6 +72,50 @@ enum SelfTestRunner {
     private static func tagAndLinkExtraction() throws {
         try expect(TreeOperations.extractTags("hello #项目 #local-first") == ["项目", "local-first"], "tag extraction failed")
         try expect(TreeOperations.extractLinks("见 [[文档名]] 和 [[A#B]]") == ["文档名", "A#B"], "link extraction failed")
+    }
+
+    @MainActor
+    private static func documentUndoWorksAcrossOutlineMindMapAndMarkdown() throws {
+        let repository = try WorkspaceRepository(inMemory: true)
+        let store = AppStore(repository: repository)
+        let node = OutlineNodeDTO(id: "undo-node", text: "Undo me")
+        let document = OutlineDocumentDTO(id: "undo-doc", title: "Undo", nodes: [node])
+        store.workspace = WorkspaceV1DTO(activeDocumentId: document.id, documents: [document])
+        store.mode = .outline
+        store.activeNodeId = node.id
+        let initialWorkspace = store.workspace
+
+        store.toggleStrike(node.id)
+        try expect(store.activeNode?.strike == true, "strike toggle should mark node")
+        store.insertChild(node.id)
+        try expect(store.activeNode?.id != node.id, "insert child should select new node")
+        store.undoLastDocumentChange()
+        try expect(store.activeDocument?.nodes.first?.strike == true, "first undo should restore previous outline operation")
+        store.undoLastDocumentChange()
+        try expect(store.workspace == initialWorkspace, "second undo should return to startup workspace")
+
+        store.removeNode(node.id)
+        try expect(TreeOperations.findNode(in: store.activeDocument?.nodes ?? [], id: node.id) == nil, "remove should delete target node")
+        store.undoLastDocumentChange()
+        try expect(store.activeDocument?.nodes.first?.id == node.id, "undo should restore deleted node")
+
+        store.mode = .mindmap
+        store.insertMindMapRootChild()
+        try expect((store.activeDocument?.nodes.count ?? 0) == 2, "mind map root insert should add node")
+        store.undoLastDocumentChange()
+        try expect((store.activeDocument?.nodes.count ?? 0) == 1, "undo should restore mind map change")
+
+        let beforeMarkdown = store.workspace
+        store.mode = .markdown
+        store.setMarkdownSource("# Changed\n\n- Markdown node", coalescingKey: "markdown:undo-doc")
+        try expect(store.activeDocument?.title == "Changed", "markdown edit should change title")
+        store.undoLastDocumentChange()
+        try expect(store.workspace == beforeMarkdown, "undo should restore markdown change")
+
+        store.toggleStrike(node.id)
+        try expect(store.activeNode?.strike == true, "strike toggle should mark node after cross-mode undos")
+        store.undoLastDocumentChange()
+        try expect(store.activeNode?.strike != true, "undo should restore strike state")
     }
 
     @MainActor

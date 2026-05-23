@@ -49,8 +49,14 @@ struct MarkdownEditorView: View {
                 .foregroundStyle(.secondary)
             AppKitTextView(text: Binding(
                 get: { MarkdownCodec.documentMarkdown(store.activeDocument ?? OutlineDocumentDTO()) },
-                set: { store.setMarkdownSource($0) }
-            ))
+                set: { value in
+                    store.setMarkdownSource(value, coalescingKey: "markdown:\(store.activeDocument?.id ?? "active")")
+                }
+            ), forceRefreshToken: store.undoApplyRevision, onUndoShortcut: {
+                store.undoDocumentCommand()
+            }, onEditingEnded: {
+                store.finishCoalescedUndo()
+            })
         }
         .padding(16)
         .frame(minWidth: 360, maxWidth: .infinity, minHeight: 520, maxHeight: .infinity)

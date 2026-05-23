@@ -175,7 +175,10 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
-            Toggle("使用暗黑模式", isOn: $store.useDarkMode)
+            Toggle("使用暗黑模式", isOn: Binding(
+                get: { store.useDarkMode },
+                set: { store.setDarkMode($0) }
+            ))
             HStack {
                 Text("iCloud 备份目录")
                 Spacer()

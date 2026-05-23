@@ -105,13 +105,16 @@ private struct OutlineRowView: View {
 
             OutlineNodeTextEditor(text: Binding(
                 get: { row.node.text },
-                set: { text in store.updateNode(row.node.id) { $0.text = text } }
-            ), placeholder: "输入主题", fontSize: fontSize(row.node), fontWeight: fontWeight(row.node), italic: row.node.italic == true, textColor: nsTextColor(row.node), strikethrough: row.node.strike == true || (row.node.checked && row.node.isTodo == true), isActive: store.activeNodeId == row.node.id, onSubmit: {
+                set: { text in store.updateNodeText(row.node.id, text: text) }
+            ), placeholder: "输入主题", fontSize: fontSize(row.node), fontWeight: fontWeight(row.node), italic: row.node.italic == true, textColor: nsTextColor(row.node), strikethrough: row.node.strike == true || (row.node.checked && row.node.isTodo == true), isActive: store.activeNodeId == row.node.id, forceRefreshToken: store.undoApplyRevision, onSubmit: {
+                store.finishCoalescedUndo()
                 store.insertAfter(row.node.id)
             }, onIndent: {
+                store.finishCoalescedUndo()
                 store.activeNodeId = row.node.id
                 store.indentActive()
             }, onOutdent: {
+                store.finishCoalescedUndo()
                 store.activeNodeId = row.node.id
                 store.outdentActive()
             }, onMoveUp: {
@@ -121,7 +124,12 @@ private struct OutlineRowView: View {
                 store.activeNodeId = row.node.id
                 store.navigateActiveDown()
             }, onSelect: {
+                store.finishCoalescedUndo()
                 store.activeNodeId = row.node.id
+            }, onUndo: {
+                store.undoDocumentCommand()
+            }, onEditingEnded: {
+                store.finishCoalescedUndo()
             }, menuActions: OutlineNodeTextMenuActions(
                 isFocused: store.focusNodeId == row.node.id,
                 insertSibling: { store.insertAfter(row.node.id) },
@@ -130,6 +138,7 @@ private struct OutlineRowView: View {
                 clearFocus: { store.clearFocus() },
                 copyLink: { store.copyNodeLink(row.node) },
                 toggleTodo: { store.updateNode(row.node.id) { $0.isTodo = !($0.isTodo ?? false) } },
+                toggleStrike: { store.toggleStrike(row.node.id) },
                 setColor: { item in store.updateNode(row.node.id) { $0.color = item.rawValue } },
                 delete: { store.removeNode(row.node.id) }
             ))
@@ -158,6 +167,7 @@ private struct OutlineRowView: View {
             Divider()
             Button("复制主题链接") { store.copyNodeLink(row.node) }
             Button("转化为待办任务") { store.updateNode(row.node.id) { $0.isTodo = !($0.isTodo ?? false) } }
+            Button("删除线") { store.toggleStrike(row.node.id) }
             Menu("颜色") {
                 ForEach(OutlineColor.allCases) { item in
                     Button(item.title) { store.updateNode(row.node.id) { $0.color = item.rawValue } }

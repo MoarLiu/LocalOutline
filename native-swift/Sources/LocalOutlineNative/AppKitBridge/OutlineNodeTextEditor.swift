@@ -9,6 +9,7 @@ struct OutlineNodeTextMenuActions {
     var clearFocus: () -> Void
     var copyLink: () -> Void
     var toggleTodo: () -> Void
+    var toggleStrike: () -> Void
     var setColor: (OutlineColor) -> Void
     var delete: () -> Void
 }
@@ -22,12 +23,15 @@ struct OutlineNodeTextEditor: NSViewRepresentable {
     var textColor: NSColor
     var strikethrough: Bool
     var isActive: Bool
+    var forceRefreshToken: Int
     var onSubmit: () -> Void
     var onIndent: () -> Void
     var onOutdent: () -> Void
     var onMoveUp: () -> Void
     var onMoveDown: () -> Void
     var onSelect: () -> Void
+    var onUndo: () -> Void
+    var onEditingEnded: () -> Void
     var menuActions: OutlineNodeTextMenuActions
 
     func makeNSView(context: Context) -> ContextMenuTextView {
@@ -61,8 +65,11 @@ struct OutlineNodeTextEditor: NSViewRepresentable {
     func updateNSView(_ nsView: ContextMenuTextView, context: Context) {
         context.coordinator.update(self)
         nsView.coordinator = context.coordinator
-        if nsView.string != text, !context.coordinator.isEditing {
+        let shouldForceRefresh = context.coordinator.shouldForceRefresh(for: forceRefreshToken)
+        if nsView.string != text, !context.coordinator.isEditing || shouldForceRefresh {
+            context.coordinator.isApplyingExternalText = true
             nsView.string = text
+            context.coordinator.isApplyingExternalText = false
         }
         applyStyle(to: nsView, context: context)
         nsView.placeholderString = placeholder
@@ -118,14 +125,23 @@ struct OutlineNodeTextEditor: NSViewRepresentable {
         @Binding var text: String
         var parent: OutlineNodeTextEditor
         var isEditing = false
+        var isApplyingExternalText = false
+        private var lastAppliedRefreshToken: Int
 
         init(parent: OutlineNodeTextEditor, text: Binding<String>) {
             self.parent = parent
             _text = text
+            lastAppliedRefreshToken = parent.forceRefreshToken
         }
 
         func update(_ parent: OutlineNodeTextEditor) {
             self.parent = parent
+        }
+
+        func shouldForceRefresh(for token: Int) -> Bool {
+            guard token != lastAppliedRefreshToken else { return false }
+            lastAppliedRefreshToken = token
+            return true
         }
 
         func selectRow() {
@@ -144,6 +160,7 @@ struct OutlineNodeTextEditor: NSViewRepresentable {
             menu.addItem(.separator())
             menu.addItem(item("复制主题链接", #selector(copyLink)))
             menu.addItem(item("转化为待办任务", #selector(toggleTodo)))
+            menu.addItem(item("删除线", #selector(toggleStrike)))
 
             let colorMenu = NSMenu()
             for color in OutlineColor.allCases {
@@ -187,6 +204,10 @@ struct OutlineNodeTextEditor: NSViewRepresentable {
             parent.menuActions.toggleTodo()
         }
 
+        @objc private func toggleStrike() {
+            parent.menuActions.toggleStrike()
+        }
+
         @objc private func setColor(_ sender: NSMenuItem) {
             guard
                 let rawValue = sender.representedObject as? String,
@@ -210,10 +231,13 @@ struct OutlineNodeTextEditor: NSViewRepresentable {
                 text = view.string
                 view.needsDisplay = true
             }
+            parent.onEditingEnded()
         }
 
         func textDidChange(_ notification: Notification) {
             guard let view = notification.object as? NSTextView else { return }
+            guard !isApplyingExternalText else { return }
+            text = view.string
             view.invalidateIntrinsicContentSize()
             view.needsDisplay = true
         }
@@ -266,6 +290,11 @@ struct OutlineNodeTextEditor: NSViewRepresentable {
                     return true
                 }
             }
+            if NSStringFromSelector(commandSelector) == "undo:" {
+                text = textView.string
+                parent.onUndo()
+                return true
+            }
             return false
         }
     }
@@ -296,6 +325,15 @@ final class ContextMenuTextView: NSTextView {
         coordinator?.selectRow()
         guard let menu = coordinator?.makeMenu() else { return }
         NSMenu.popUpContextMenu(menu, with: event, for: self)
+    }
+
+    override func keyDown(with event: NSEvent) {
+        let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        if event.charactersIgnoringModifiers?.lowercased() == "z", modifiers == .command {
+            coordinator?.parent.onUndo()
+            return
+        }
+        super.keyDown(with: event)
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {

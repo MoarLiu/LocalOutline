@@ -36,18 +36,13 @@ struct PresentationView: View {
                 endPoint: .bottomTrailing
             )
         )
-        .focusable()
-        .onKeyPress(.rightArrow) {
-            deckState.next(count: slides.count)
-            return .handled
-        }
-        .onKeyPress(.space) {
-            deckState.next(count: slides.count)
-            return .handled
-        }
-        .onKeyPress(.leftArrow) {
-            deckState.previous(count: slides.count)
-            return .handled
+        .overlay {
+            PresentationKeyboardBridge(
+                onNext: { deckState.next(count: slides.count) },
+                onPrevious: { deckState.previous(count: slides.count) }
+            )
+            .frame(width: 0, height: 0)
+            .allowsHitTesting(false)
         }
         .onChange(of: slides.count) { _, count in
             deckState.clamp(count: count)
@@ -65,6 +60,75 @@ struct PresentationView: View {
         }
         fullscreenSession = session
         session.show()
+    }
+}
+
+private struct PresentationKeyboardBridge: NSViewRepresentable {
+    var onNext: () -> Void
+    var onPrevious: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onNext: onNext, onPrevious: onPrevious)
+    }
+
+    func makeNSView(context: Context) -> PresentationKeyboardView {
+        let view = PresentationKeyboardView()
+        view.onNext = { context.coordinator.onNext() }
+        view.onPrevious = { context.coordinator.onPrevious() }
+        return view
+    }
+
+    func updateNSView(_ nsView: PresentationKeyboardView, context: Context) {
+        context.coordinator.onNext = onNext
+        context.coordinator.onPrevious = onPrevious
+        nsView.onNext = { context.coordinator.onNext() }
+        nsView.onPrevious = { context.coordinator.onPrevious() }
+        nsView.requestKeyFocus()
+    }
+
+    final class Coordinator {
+        var onNext: () -> Void
+        var onPrevious: () -> Void
+
+        init(onNext: @escaping () -> Void, onPrevious: @escaping () -> Void) {
+            self.onNext = onNext
+            self.onPrevious = onPrevious
+        }
+    }
+}
+
+private final class PresentationKeyboardView: NSView {
+    var onNext: (() -> Void)?
+    var onPrevious: (() -> Void)?
+
+    override var acceptsFirstResponder: Bool { true }
+    override var focusRingType: NSFocusRingType {
+        get { .none }
+        set {}
+    }
+
+    func requestKeyFocus() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.window?.firstResponder !== self else { return }
+            self.window?.makeFirstResponder(self)
+        }
+    }
+
+    override func keyDown(with event: NSEvent) {
+        let commandLikeModifiers: NSEvent.ModifierFlags = [.command, .option, .control]
+        guard event.modifierFlags.intersection(commandLikeModifiers).isEmpty else {
+            super.keyDown(with: event)
+            return
+        }
+
+        switch event.keyCode {
+        case 49, 124, 125:
+            onNext?()
+        case 123, 126:
+            onPrevious?()
+        default:
+            super.keyDown(with: event)
+        }
     }
 }
 
@@ -204,75 +268,21 @@ private struct SlideStage: View {
                 .frame(maxWidth: .infinity)
                 Spacer()
             } else {
-                Spacer()
-                HStack {
-                    Spacer(minLength: 0)
-                    VStack(alignment: .leading, spacing: 24) {
-                        Text(slide.title)
-                            .font(.system(size: isFullscreen ? 50 : 42, weight: .bold))
-                            .lineLimit(3)
-                            .minimumScaleFactor(0.5)
-                            .foregroundStyle(titleGradient)
-                        if let note = slide.note, !note.isEmpty {
-                            Text(note)
-                                .font(.title3.italic())
-                                .foregroundStyle(Color.secondary)
-                                .padding(.horizontal, 16)
-                                .padding(.vertical, 10)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(Color.accentColor.opacity(0.06), in: UnevenRoundedRectangle(topLeadingRadius: 0, bottomLeadingRadius: 0, bottomTrailingRadius: 8, topTrailingRadius: 8))
-                                .overlay(alignment: .leading) {
-                                    Rectangle()
-                                        .fill(Color.accentColor)
-                                        .frame(width: 4)
-                                }
-                        }
+                GeometryReader { proxy in
+                    let contentWidth = min(proxy.size.width * 0.82, isFullscreen ? 1480 : 920)
+                    ViewThatFits(in: .vertical) {
+                        detailContent
+                            .frame(width: contentWidth, alignment: .leading)
+
                         ScrollView {
-                            VStack(alignment: .leading, spacing: isFullscreen ? 20 : 16) {
-                                ForEach(slide.points) { point in
-                                    VStack(alignment: .leading, spacing: 9) {
-                                        HStack(alignment: .firstTextBaseline, spacing: 12) {
-                                            Text("•")
-                                                .font(.title2.bold())
-                                                .foregroundStyle(Color.accentColor)
-                                            Text(point.text.isEmpty ? Defaults.nodeText : point.text)
-                                                .font(.system(size: isFullscreen ? 26 : 21, weight: .semibold))
-                                                .foregroundStyle(Color.primary)
-                                        }
-                                        if !point.children.isEmpty {
-                                            VStack(alignment: .leading, spacing: 8) {
-                                                ForEach(point.children) { child in
-                                                    HStack(alignment: .firstTextBaseline, spacing: 10) {
-                                                        Text("-")
-                                                        Text(child.text.isEmpty ? Defaults.nodeText : child.text)
-                                                    }
-                                                    .foregroundStyle(Color.secondary)
-                                                }
-                                            }
-                                            .font(.system(size: isFullscreen ? 20 : 16))
-                                            .padding(.leading, 34)
-                                            .overlay(alignment: .leading) {
-                                                DashedVerticalLine(isFullscreen: isFullscreen)
-                                                    .padding(.leading, 8)
-                                            }
-                                        }
-                                    }
-                                }
-                                if slide.points.isEmpty {
-                                    Text("无详细内容")
-                                        .italic()
-                                        .foregroundStyle(Color.secondary)
-                                }
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.trailing, 8)
+                            detailContent
+                                .frame(width: contentWidth, alignment: .leading)
+                                .padding(.vertical, 18)
                         }
+                        .frame(width: contentWidth)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .frame(maxWidth: isFullscreen ? 860 : 760, alignment: .leading)
-                    Spacer(minLength: 0)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                 }
-                Spacer()
             }
         }
         .padding(.horizontal, isFullscreen ? 80 : 64)
@@ -288,6 +298,72 @@ private struct SlideStage: View {
             startPoint: .leading,
             endPoint: .trailing
         )
+    }
+
+    private var detailContent: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            Text(slide.title)
+                .font(.system(size: isFullscreen ? 50 : 42, weight: .bold))
+                .lineLimit(3)
+                .minimumScaleFactor(0.5)
+                .foregroundStyle(titleGradient)
+            if let note = slide.note, !note.isEmpty {
+                Text(note)
+                    .font(.title3.italic())
+                    .foregroundStyle(Color.secondary)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.accentColor.opacity(0.06), in: UnevenRoundedRectangle(topLeadingRadius: 0, bottomLeadingRadius: 0, bottomTrailingRadius: 8, topTrailingRadius: 8))
+                    .overlay(alignment: .leading) {
+                        Rectangle()
+                            .fill(Color.accentColor)
+                            .frame(width: 4)
+                    }
+            }
+            pointsContent
+        }
+    }
+
+    private var pointsContent: some View {
+        VStack(alignment: .leading, spacing: isFullscreen ? 20 : 16) {
+            ForEach(slide.points) { point in
+                VStack(alignment: .leading, spacing: 9) {
+                    HStack(alignment: .firstTextBaseline, spacing: 12) {
+                        Text("•")
+                            .font(.title2.bold())
+                            .foregroundStyle(Color.accentColor)
+                        Text(point.text.isEmpty ? Defaults.nodeText : point.text)
+                            .font(.system(size: isFullscreen ? 26 : 21, weight: .semibold))
+                            .foregroundStyle(Color.primary)
+                    }
+                    if !point.children.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(point.children) { child in
+                                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                                    Text("-")
+                                    Text(child.text.isEmpty ? Defaults.nodeText : child.text)
+                                }
+                                .foregroundStyle(Color.secondary)
+                            }
+                        }
+                        .font(.system(size: isFullscreen ? 20 : 16))
+                        .padding(.leading, 34)
+                        .overlay(alignment: .leading) {
+                            DashedVerticalLine(isFullscreen: isFullscreen)
+                                .padding(.leading, 8)
+                        }
+                    }
+                }
+            }
+            if slide.points.isEmpty {
+                Text("无详细内容")
+                    .italic()
+                    .foregroundStyle(Color.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.trailing, 8)
     }
 }
 

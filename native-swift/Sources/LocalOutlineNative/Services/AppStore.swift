@@ -2,6 +2,12 @@ import AppKit
 import Combine
 import Foundation
 
+private struct WorkspaceUndoSnapshot {
+    var workspace: WorkspaceV1DTO
+    var activeNodeId: String?
+    var focusNodeId: String?
+}
+
 @MainActor
 final class AppStore: ObservableObject {
     @Published var workspace: WorkspaceV1DTO = SampleData.starterWorkspace()
@@ -13,11 +19,16 @@ final class AppStore: ObservableObject {
     @Published var selectedTag: String?
     @Published var notice: String?
     @Published var showDeleteConfirmation = false
-    @Published var useDarkMode = false
+    @Published var useDarkMode = false {
+        didSet { applyAppearance() }
+    }
+    @Published var undoApplyRevision = 0
 
     let repository: WorkspaceRepository
     private var saveTask: Task<Void, Never>?
     private var noticeTask: Task<Void, Never>?
+    private var undoStack: [WorkspaceUndoSnapshot] = []
+    private var lastUndoCoalescingKey: String?
 
     init(repository: WorkspaceRepository) {
         self.repository = repository
@@ -87,6 +98,9 @@ final class AppStore: ObservableObject {
         do {
             workspace = try repository.loadWorkspace()
             activeNodeId = TreeOperations.firstNodeId(activeDocument?.nodes ?? [])
+            focusNodeId = nil
+            clearUndoHistory()
+            applyAppearance()
         } catch {
             show("载入失败：\(error.localizedDescription)")
         }
@@ -129,10 +143,12 @@ final class AppStore: ObservableObject {
         workspace.activeDocumentId = id
         focusNodeId = nil
         activeNodeId = TreeOperations.firstNodeId(activeDocument?.nodes ?? [])
+        finishCoalescedUndo()
         scheduleSave()
     }
 
     func createDocument() {
+        recordUndoSnapshot()
         let id = UUID().uuidString
         let document = OutlineDocumentDTO(id: id, title: Defaults.documentTitle, nodes: [OutlineNodeDTO(text: "新主题")])
         workspace.documents.insert(document, at: 0)
@@ -145,6 +161,7 @@ final class AppStore: ObservableObject {
 
     func duplicateDocument() {
         guard var source = activeDocument else { return }
+        recordUndoSnapshot()
         source.id = UUID().uuidString
         source.title += " 副本"
         source.createdAt = Date.isoNow
@@ -162,6 +179,7 @@ final class AppStore: ObservableObject {
             show("至少保留一个文档")
             return
         }
+        recordUndoSnapshot()
         workspace.documents.removeAll { $0.id == activeDocument.id }
         workspace.activeDocumentId = workspace.documents[0].id
         activeNodeId = TreeOperations.firstNodeId(workspace.documents[0].nodes)
@@ -171,7 +189,8 @@ final class AppStore: ObservableObject {
     }
 
     func updateTitle(_ title: String) {
-        patchActiveDocument { document in
+        guard let documentId = activeDocument?.id else { return }
+        patchActiveDocument(coalescingKey: "title:\(documentId)") { document in
             document.title = title.isEmpty ? Defaults.documentTitle : title
             document.updatedAt = Date.isoNow
             document.markdownSource = nil
@@ -179,25 +198,44 @@ final class AppStore: ObservableObject {
         }
     }
 
-    func setMarkdownSource(_ value: String) {
+    func setMarkdownSource(_ value: String, coalescingKey: String? = nil) {
         guard var document = activeDocument else { return }
-        document = MarkdownCodec.parseDocument(value, previousDocument: document, documentId: document.id)
+        let normalized = MarkdownCodec.normalizeSource(value)
+        guard MarkdownCodec.documentMarkdown(document) != normalized else { return }
+        recordUndoSnapshot(coalescingKey: coalescingKey)
+        document = MarkdownCodec.parseDocument(normalized, previousDocument: document, documentId: document.id)
         replaceActiveDocument(document)
         activeNodeId = activeNodeId.flatMap { TreeOperations.findNode(in: document.nodes, id: $0)?.id } ?? TreeOperations.firstNodeId(document.nodes)
     }
 
     func setActiveNodes(_ nodes: [OutlineNodeDTO]) {
-        patchActiveDocument { document in
-            document.nodes = nodes
-            document.updatedAt = Date.isoNow
-            document.markdownSource = nil
-            document.markdownUpdatedAt = nil
-        }
+        guard var document = activeDocument, document.nodes != nodes else { return }
+        recordUndoSnapshot()
+        document.nodes = nodes
+        document.updatedAt = Date.isoNow
+        document.markdownSource = nil
+        document.markdownUpdatedAt = nil
+        replaceActiveDocument(document)
     }
 
     func updateNode(_ id: String, _ transform: (inout OutlineNodeDTO) -> Void) {
         guard let document = activeDocument else { return }
         setActiveNodes(TreeOperations.updateNode(document.nodes, id: id, transform: transform))
+    }
+
+    func updateNodeText(_ id: String, text: String) {
+        guard let document = activeDocument,
+              TreeOperations.findNode(in: document.nodes, id: id)?.text != text else { return }
+        recordUndoSnapshot(coalescingKey: "nodeText:\(id)")
+        applyActiveNodes(TreeOperations.updateNode(document.nodes, id: id) { node in
+            node.text = text
+        })
+    }
+
+    func toggleStrike(_ id: String) {
+        updateNode(id) { node in
+            node.strike = !(node.strike ?? false)
+        }
     }
 
     func insertAfter(_ id: String) {
@@ -220,10 +258,9 @@ final class AppStore: ObservableObject {
             show("已新增子节点")
             return
         }
-        guard var document = activeDocument else { return }
+        guard let document = activeDocument else { return }
         let node = OutlineNodeDTO(text: "")
-        document.nodes.append(node)
-        replaceActiveDocument(document)
+        setActiveNodes(document.nodes + [node])
         activeNodeId = node.id
         show("已新增子节点")
     }
@@ -294,6 +331,28 @@ final class AppStore: ObservableObject {
         show("已退出聚焦")
     }
 
+    func undoDocumentCommand() {
+        undoLastDocumentChange()
+    }
+
+    func undoLastDocumentChange() {
+        guard let snapshot = undoStack.popLast() else { return }
+        restoreUndoSnapshot(snapshot)
+        show("已撤销")
+    }
+
+    func finishCoalescedUndo() {
+        lastUndoCoalescingKey = nil
+    }
+
+    func setDarkMode(_ enabled: Bool) {
+        useDarkMode = enabled
+    }
+
+    func toggleDarkMode() {
+        setDarkMode(!useDarkMode)
+    }
+
     func exportActive(format: ExportFormat) {
         guard let document = activeDocument else { return }
         do {
@@ -335,15 +394,20 @@ final class AppStore: ObservableObject {
             switch imported {
             case .workspace(let next):
                 try repository.createSnapshot(reason: "before-import-workspace", workspace: workspace)
+                recordUndoSnapshot()
                 workspace = next
                 activeNodeId = TreeOperations.firstNodeId(activeDocument?.nodes ?? [])
+                focusNodeId = nil
                 show("已导入工作区：\(url.lastPathComponent)")
             case .document(let document):
+                recordUndoSnapshot()
                 workspace.documents.insert(document, at: 0)
                 workspace.activeDocumentId = document.id
                 activeNodeId = TreeOperations.firstNodeId(document.nodes)
+                focusNodeId = nil
                 show("已导入文档：\(url.lastPathComponent)")
             }
+            finishCoalescedUndo()
             scheduleSave()
         } catch {
             show("导入失败：\(error.localizedDescription)")
@@ -361,8 +425,11 @@ final class AppStore: ObservableObject {
             do {
                 try repository.createSnapshot(reason: "before-icloud-restore", workspace: workspace)
             } catch {}
+            recordUndoSnapshot()
             workspace = next
             activeNodeId = TreeOperations.firstNodeId(activeDocument?.nodes ?? [])
+            focusNodeId = nil
+            finishCoalescedUndo()
             scheduleSave()
             show("已载入 iCloud 备份：\(path)")
         case .failure(let error):
@@ -389,9 +456,12 @@ final class AppStore: ObservableObject {
         }
     }
 
-    private func patchActiveDocument(_ mutate: (inout OutlineDocumentDTO) -> Void) {
+    private func patchActiveDocument(coalescingKey: String? = nil, _ mutate: (inout OutlineDocumentDTO) -> Void) {
         guard var document = activeDocument else { return }
+        let previous = document
         mutate(&document)
+        guard document != previous else { return }
+        recordUndoSnapshot(coalescingKey: coalescingKey)
         replaceActiveDocument(document)
     }
 
@@ -399,6 +469,57 @@ final class AppStore: ObservableObject {
         guard let index = workspace.documents.firstIndex(where: { $0.id == document.id }) else { return }
         workspace.documents[index] = document
         scheduleSave()
+    }
+
+    private func applyActiveNodes(_ nodes: [OutlineNodeDTO]) {
+        guard var document = activeDocument else { return }
+        document.nodes = nodes
+        document.updatedAt = Date.isoNow
+        document.markdownSource = nil
+        document.markdownUpdatedAt = nil
+        replaceActiveDocument(document)
+    }
+
+    private func recordUndoSnapshot(coalescingKey: String? = nil) {
+        if let coalescingKey, lastUndoCoalescingKey == coalescingKey {
+            return
+        }
+        let snapshot = WorkspaceUndoSnapshot(
+            workspace: workspace,
+            activeNodeId: activeNodeId,
+            focusNodeId: focusNodeId
+        )
+        if let last = undoStack.last,
+           last.workspace == snapshot.workspace,
+           last.activeNodeId == snapshot.activeNodeId,
+           last.focusNodeId == snapshot.focusNodeId {
+            return
+        }
+        undoStack.append(snapshot)
+        lastUndoCoalescingKey = coalescingKey
+    }
+
+    private func restoreUndoSnapshot(_ snapshot: WorkspaceUndoSnapshot) {
+        workspace = TreeOperations.normalizeWorkspace(snapshot.workspace)
+        activeNodeId = validNodeId(snapshot.activeNodeId) ?? TreeOperations.firstNodeId(activeDocument?.nodes ?? [])
+        focusNodeId = validNodeId(snapshot.focusNodeId)
+        undoApplyRevision += 1
+        finishCoalescedUndo()
+        scheduleSave()
+    }
+
+    private func validNodeId(_ id: String?) -> String? {
+        guard let activeDocument, let id else { return nil }
+        return TreeOperations.findNode(in: activeDocument.nodes, id: id)?.id
+    }
+
+    private func clearUndoHistory() {
+        undoStack.removeAll(keepingCapacity: true)
+        finishCoalescedUndo()
+    }
+
+    private func applyAppearance() {
+        NSApp.appearance = NSAppearance(named: useDarkMode ? .darkAqua : .aqua)
     }
 
     private func rekey(_ nodes: [OutlineNodeDTO]) -> [OutlineNodeDTO] {

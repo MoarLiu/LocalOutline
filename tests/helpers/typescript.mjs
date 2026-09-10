@@ -1,0 +1,37 @@
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import vm from "node:vm";
+import ts from "typescript";
+
+export const projectRoot = fileURLToPath(new URL("../../", import.meta.url));
+const cache = new Map();
+const compile = (source) => ts.transpileModule(source, {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+}).outputText;
+
+// Run the actual browser modules in Node without emitting build files.
+export function loadTypescript(filename) {
+  const resolved = path.resolve(projectRoot, filename);
+  if (cache.has(resolved)) return cache.get(resolved).exports;
+  const module = { exports: {} };
+  cache.set(resolved, module);
+  const require = createRequire(resolved);
+  const code = compile(readFileSync(resolved, "utf8"));
+  const execute = vm.runInThisContext(`(function(require, module, exports) {\n${code}\n})`, { filename: resolved });
+  execute((name) => name.startsWith(".")
+    ? loadTypescript(path.resolve(path.dirname(resolved), `${name}.ts`))
+    : require(name), module, module.exports);
+  return module.exports;
+}
+
+export function loadAppCallback(name, bindings) {
+  const filename = path.join(projectRoot, "src/App.tsx");
+  const ast = ts.createSourceFile(filename, readFileSync(filename, "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const app = ast.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === "App");
+  const declaration = app.body.statements
+    .flatMap((node) => ts.isVariableStatement(node) ? [...node.declarationList.declarations] : [])
+    .find((node) => node.name.getText(ast) === name);
+  return vm.runInNewContext(compile(`(${declaration.initializer.arguments[0].getText(ast)})`), bindings, { filename });
+}

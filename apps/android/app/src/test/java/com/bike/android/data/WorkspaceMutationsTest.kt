@@ -3,11 +3,47 @@ package com.bike.android.data
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.Instant
 
 class WorkspaceMutationsTest {
+    @Test
+    fun contentEditsClearMarkdownWhileViewChangesPreserveIt() {
+        val timestamp = "2026-09-01T00:00:00Z"
+        val document = OutlineDocument(
+            id = "doc", title = INBOX_DOCUMENT_TITLE, createdAt = timestamp, updatedAt = timestamp,
+            markdownSource = "# Original\n\n- Original", markdownUpdatedAt = timestamp,
+            nodes = listOf(outlineNode("Original").copy(id = "node", children = listOf(outlineNode("Child").copy(id = "child")))),
+        )
+        val workspace = Workspace(activeDocumentId = document.id, documents = listOf(document))
+        val contentEdits = listOf(
+            workspace.withNodeText("doc", "node", "Edited"),
+            workspace.withNodeNote("doc", "node", "Note"),
+            workspace.withNodeChecked("doc", "node", true),
+            workspace.withChildNode("doc", "node", "New"),
+            workspace.withNodeMovedToParentLevel("doc", "child"),
+            workspace.withNodeDeleted("doc", "child"),
+            workspace.withDocumentTitle("doc", "Renamed"),
+            workspace.withInboxEntry("New entry"),
+            workspace.withDocumentDuplicated("doc"),
+        )
+        contentEdits.forEach { edited ->
+            assertNull(edited.activeDocument().markdownSource)
+            assertNull(edited.activeDocument().markdownUpdatedAt)
+        }
+        val viewEdits = listOf(
+            workspace.withNodeCollapsed("doc", "node", true),
+            workspace.withDocumentShortcut("doc", true),
+            workspace.withNodeText("doc", "node", "Original", now = Instant.parse("2026-09-02T00:00:00Z")),
+        )
+        viewEdits.forEach { edited ->
+            assertEquals(document.markdownSource, edited.activeDocument().markdownSource)
+            assertEquals(document.markdownUpdatedAt, edited.activeDocument().markdownUpdatedAt)
+        }
+    }
+
     @Test
     fun switchesActiveDocumentOnlyWhenDocumentExists() {
         val workspace = createStarterWorkspace(Instant.parse("2026-06-13T00:00:00Z"))

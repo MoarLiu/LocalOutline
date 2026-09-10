@@ -24,7 +24,7 @@ fun Workspace.withDocumentShortcut(
     isShortcut: Boolean,
     now: Instant = Instant.now(),
 ): Workspace =
-    updateDocument(documentId) { document ->
+    updateDocument(documentId, preserveMarkdown = true) { document ->
         document.copy(
             isShortcut = isShortcut,
             updatedAt = now.toString(),
@@ -167,6 +167,8 @@ fun Workspace.withInboxEntry(
                 document.copy(
                     updatedAt = timestamp,
                     nodes = listOf(node) + document.nodes,
+                    markdownSource = null,
+                    markdownUpdatedAt = null,
                 )
             } else {
                 document
@@ -227,7 +229,7 @@ fun Workspace.withNodeCollapsed(
     collapsed: Boolean,
     now: Instant = Instant.now(),
 ): Workspace =
-    updateDocument(documentId) { document ->
+    updateDocument(documentId, preserveMarkdown = true) { document ->
         document.copy(
             nodes = document.nodes.updateNode(nodeId) { node ->
                 node.copy(collapsed = collapsed)
@@ -414,6 +416,8 @@ private fun OutlineDocument.duplicated(now: Instant): OutlineDocument {
         title = title.copyTitle(),
         createdAt = timestamp,
         updatedAt = timestamp,
+        markdownSource = null,
+        markdownUpdatedAt = null,
         nodes = nodes.map { it.duplicated() },
     )
 }
@@ -433,11 +437,16 @@ private fun String.copyTitle(): String =
 
 private fun Workspace.updateDocument(
     documentId: String,
+    preserveMarkdown: Boolean = false,
     update: (OutlineDocument) -> OutlineDocument,
 ): Workspace =
     copy(
         documents = documents.map { document ->
-            if (document.id == documentId) update(document) else document
+            if (document.id == documentId) {
+                val updated = update(document)
+                if (preserveMarkdown || updated.copy(updatedAt = document.updatedAt) == document) updated
+                else updated.copy(markdownSource = null, markdownUpdatedAt = null)
+            } else document
         },
     )
 

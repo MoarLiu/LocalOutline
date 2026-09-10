@@ -13,7 +13,7 @@ enum TreeOperations {
             documents = [document]
         }
         let active = documents.contains { $0.id == workspace.activeDocumentId } ? workspace.activeDocumentId : documents[0].id
-        return WorkspaceV1DTO(version: 1, activeDocumentId: active, documents: documents)
+        return WorkspaceV1DTO(version: 1, activeDocumentId: active, documents: documents, additionalFields: workspace.additionalFields)
     }
 
     static func normalizeDocument(_ document: OutlineDocumentDTO, usedIds: inout Set<String>) -> OutlineDocumentDTO {

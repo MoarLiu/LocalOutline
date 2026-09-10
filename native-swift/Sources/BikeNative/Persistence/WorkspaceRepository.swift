@@ -17,8 +17,8 @@ final class WorkspaceRepository {
                 ? URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("BikeNative-\(UUID().uuidString)", isDirectory: true)
                 : FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Local Outline Native", isDirectory: true)
         )
-        let base = baseURL ?? BikeStorage.documentsDirectoryURL()
-        let legacyBase = baseURL == nil ? BikeStorage.legacyDocumentsDirectoryURL() : nil
+        let base = baseURL ?? (inMemory ? legacyApplicationSupportBase : BikeStorage.documentsDirectoryURL())
+        let legacyBase = baseURL == nil && !inMemory ? BikeStorage.legacyDocumentsDirectoryURL() : nil
         let legacyBackupBase = legacyBase?.appendingPathComponent(".backups", isDirectory: true)
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         markdownDirectoryURL = base
@@ -174,7 +174,9 @@ final class WorkspaceRepository {
                         title: $0.title,
                         createdAt: createdAt,
                         updatedAt: $0.updatedAt,
-                        nodes: ($0.nodes?.isEmpty == false ? $0.nodes : nil) ?? [OutlineNodeDTO(text: Defaults.nodeText)]
+                        nodes: ($0.nodes?.isEmpty == false ? $0.nodes : nil) ?? [OutlineNodeDTO(text: Defaults.nodeText)],
+                        isShortcut: $0.isShortcut,
+                        additionalFields: $0.additionalFields ?? [:]
                     )
                 },
                 documentId: item?.id,
@@ -191,16 +193,18 @@ final class WorkspaceRepository {
                 createdAt: normalizedDocument.createdAt,
                 updatedAt: normalizedDocument.updatedAt,
                 sortKey: index,
-                nodes: normalizedDocument.nodes
+                nodes: normalizedDocument.nodes,
+                isShortcut: normalizedDocument.isShortcut,
+                additionalFields: normalizedDocument.additionalFields.isEmpty ? nil : normalizedDocument.additionalFields
             ))
         }
 
         let active = documents.contains { $0.id == metadata.activeDocumentId } ? metadata.activeDocumentId : documents[0].id
-        let loadedMetadata = PersistedWorkspaceMetadata(activeDocumentId: active, documents: loadedMetadataDocuments)
+        let loadedMetadata = PersistedWorkspaceMetadata(activeDocumentId: active, documents: loadedMetadataDocuments, additionalFields: metadata.additionalFields)
         if loadedMetadata != metadata {
             try writeMetadata(loadedMetadata)
         }
-        return TreeOperations.normalizeWorkspace(WorkspaceV1DTO(activeDocumentId: active, documents: documents))
+        return TreeOperations.normalizeWorkspace(WorkspaceV1DTO(activeDocumentId: active, documents: documents, additionalFields: metadata.additionalFields ?? [:]))
     }
 
     private func saveMarkdownWorkspace(_ workspace: WorkspaceV1DTO) throws {
@@ -251,7 +255,9 @@ final class WorkspaceRepository {
                 createdAt: document.createdAt,
                 updatedAt: document.updatedAt,
                 sortKey: index,
-                nodes: document.nodes
+                nodes: document.nodes,
+                isShortcut: document.isShortcut,
+                additionalFields: document.additionalFields.isEmpty ? nil : document.additionalFields
             ))
         }
 
@@ -271,7 +277,7 @@ final class WorkspaceRepository {
             }
         }
 
-        let metadata = PersistedWorkspaceMetadata(activeDocumentId: workspace.activeDocumentId, documents: metadataDocuments)
+        let metadata = PersistedWorkspaceMetadata(activeDocumentId: workspace.activeDocumentId, documents: metadataDocuments, additionalFields: workspace.additionalFields.isEmpty ? nil : workspace.additionalFields)
         try writeMetadata(metadata)
     }
 
@@ -366,6 +372,7 @@ struct SnapshotInfo: Identifiable, Equatable {
 private struct PersistedWorkspaceMetadata: Codable, Equatable {
     var activeDocumentId: String
     var documents: [PersistedDocumentMetadata]
+    var additionalFields: [String: JSONValue]? = nil
 }
 
 private struct PersistedDocumentMetadata: Codable, Equatable {
@@ -376,4 +383,6 @@ private struct PersistedDocumentMetadata: Codable, Equatable {
     var updatedAt: String
     var sortKey: Int
     var nodes: [OutlineNodeDTO]? = nil
+    var isShortcut: Bool? = nil
+    var additionalFields: [String: JSONValue]? = nil
 }

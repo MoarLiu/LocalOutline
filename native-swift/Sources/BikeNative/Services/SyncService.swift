@@ -144,8 +144,8 @@ enum SyncPreferences {
     private static let configKey = "bike.native.sync.config"
     private static let stateKey = "bike.native.sync.state"
 
-    static func loadConfig() -> SyncConfig {
-        guard let data = UserDefaults.standard.data(forKey: configKey),
+    static func loadConfig(defaults: UserDefaults = .standard) -> SyncConfig {
+        guard let data = defaults.data(forKey: configKey),
               let persisted = try? ImportExportCodec.jsonDecoder.decode(PersistedSyncConfig.self, from: data) else {
             return SyncConfig(
                 serverUrl: "",
@@ -162,7 +162,7 @@ enum SyncPreferences {
         ).normalized
     }
 
-    static func saveConfig(_ config: SyncConfig) {
+    static func saveConfig(_ config: SyncConfig, defaults: UserDefaults = .standard) {
         let normalized = config.normalized
         let persisted = PersistedSyncConfig(
             serverUrl: normalized.serverUrl,
@@ -171,13 +171,13 @@ enum SyncPreferences {
             autoSyncIntervalSeconds: normalized.autoSyncIntervalSeconds
         )
         if let data = try? ImportExportCodec.jsonEncoder.encode(persisted) {
-            UserDefaults.standard.set(data, forKey: configKey)
+            defaults.set(data, forKey: configKey)
         }
     }
 
-    static func loadState(serverUrl: String) -> SyncState {
+    static func loadState(serverUrl: String, defaults: UserDefaults = .standard) -> SyncState {
         let normalizedServerUrl = SyncConfig.normalizeServerUrl(serverUrl)
-        guard let data = UserDefaults.standard.data(forKey: stateKey),
+        guard let data = defaults.data(forKey: stateKey),
               let state = try? ImportExportCodec.jsonDecoder.decode(SyncState.self, from: data),
               state.serverUrl == normalizedServerUrl else {
             return .empty(serverUrl: normalizedServerUrl)
@@ -185,9 +185,9 @@ enum SyncPreferences {
         return state
     }
 
-    static func saveState(_ state: SyncState) {
+    static func saveState(_ state: SyncState, defaults: UserDefaults = .standard) {
         if let data = try? ImportExportCodec.jsonEncoder.encode(state) {
-            UserDefaults.standard.set(data, forKey: stateKey)
+            defaults.set(data, forKey: stateKey)
         }
     }
 }
@@ -251,7 +251,10 @@ struct SyncService {
         return (workspace, state, manifest)
     }
 
-    func pushWorkspace(_ workspace: WorkspaceV1DTO) async throws -> (state: SyncState, summary: SyncSummary) {
+    func pushWorkspace(
+        _ workspace: WorkspaceV1DTO,
+        onCheckpoint: (@MainActor @Sendable (SyncState) -> Void)? = nil
+    ) async throws -> (state: SyncState, summary: SyncSummary) {
         var state = SyncState.empty(serverUrl: config.serverUrl)
         var summary = SyncSummary()
         var manifest = try await fetchManifest()
@@ -262,6 +265,7 @@ struct SyncService {
             let expectedRevision = remote?.revision
             let result = try await putDocument(document, expectedRevision: expectedRevision)
             try recordDocumentState(&state, document: result.document, revision: result.revision)
+            await onCheckpoint?(state)
             summary.uploaded += 1
         }
 
@@ -278,10 +282,13 @@ struct SyncService {
 
     func syncWorkspace(
         _ workspace: WorkspaceV1DTO,
-        previousState: SyncState
+        previousState: SyncState,
+        onCheckpoint: (@MainActor @Sendable (SyncState) -> Void)? = nil
     ) async throws -> (workspace: WorkspaceV1DTO, state: SyncState, summary: SyncSummary) {
         var state = previousState
         state.serverUrl = config.serverUrl
+        // Unapplied downloads must never enter a durable checkpoint.
+        var checkpointState = state
         var summary = SyncSummary()
         let manifest = try await fetchManifest()
         let remoteById = Dictionary(uniqueKeysWithValues: manifest.documents.map { ($0.id, $0) })
@@ -325,6 +332,8 @@ struct SyncService {
                     if knownRevision == remote.revision {
                         let deleted = try await deleteDocument(id: remote.id, expectedRevision: remote.revision)
                         recordDeletedState(&state, id: remote.id, revision: deleted.revision)
+                        recordDeletedState(&checkpointState, id: remote.id, revision: deleted.revision)
+                        await onCheckpoint?(checkpointState)
                         summary.deleted += 1
                     } else {
                         summary.conflicts.append("\(remote.title)：本机已删除，但远端有更新")
@@ -355,6 +364,8 @@ struct SyncService {
                     let uploaded = try await putDocument(local, expectedRevision: knownRevision)
                     documents = documents.map { $0.id == uploaded.document.id ? uploaded.document : $0 }
                     try recordDocumentState(&state, document: uploaded.document, revision: uploaded.revision)
+                    try recordDocumentState(&checkpointState, document: uploaded.document, revision: uploaded.revision)
+                    await onCheckpoint?(checkpointState)
                     summary.uploaded += 1
                 } else {
                     try recordDocumentState(&state, document: local, revision: remote.revision)
@@ -376,6 +387,8 @@ struct SyncService {
             let uploaded = try await putDocument(local, expectedRevision: nil)
             documents = documents.map { $0.id == uploaded.document.id ? uploaded.document : $0 }
             try recordDocumentState(&state, document: uploaded.document, revision: uploaded.revision)
+            try recordDocumentState(&checkpointState, document: uploaded.document, revision: uploaded.revision)
+            await onCheckpoint?(checkpointState)
             summary.uploaded += 1
         }
 
@@ -385,7 +398,7 @@ struct SyncService {
         let activeDocumentId = ordered.contains { $0.id == workspace.activeDocumentId }
             ? workspace.activeDocumentId
             : ordered.first?.id ?? workspace.activeDocumentId
-        let nextWorkspace = WorkspaceV1DTO(activeDocumentId: activeDocumentId, documents: ordered)
+        let nextWorkspace = WorkspaceV1DTO(activeDocumentId: activeDocumentId, documents: ordered, additionalFields: workspace.additionalFields)
 
         if summary.conflicts.isEmpty, !nextWorkspace.documents.isEmpty {
             let latestManifest = try await fetchManifest()

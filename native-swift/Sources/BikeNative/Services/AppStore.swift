@@ -8,7 +8,7 @@ private struct WorkspaceUndoSnapshot {
     var focusNodeId: String?
 }
 
-private enum WorkspaceSyncMode {
+enum WorkspaceSyncMode {
     case merge
     case push
     case pull
@@ -49,17 +49,21 @@ final class AppStore: ObservableObject {
     @Published var isSyncing = false
 
     let repository: WorkspaceRepository
+    private let syncSession: URLSession
+    private let syncDefaults: UserDefaults
     private var saveTask: Task<Void, Never>?
     private var noticeTask: Task<Void, Never>?
     private var autoSyncTask: Task<Void, Never>?
     private var undoStack: [WorkspaceUndoSnapshot] = []
     private var lastUndoCoalescingKey: String?
 
-    init(repository: WorkspaceRepository) {
+    init(repository: WorkspaceRepository, syncSession: URLSession = .shared, syncDefaults: UserDefaults = .standard) {
         self.repository = repository
-        let initialSyncConfig = SyncPreferences.loadConfig()
+        self.syncSession = syncSession
+        self.syncDefaults = syncDefaults
+        let initialSyncConfig = SyncPreferences.loadConfig(defaults: syncDefaults)
         syncConfig = initialSyncConfig
-        syncState = SyncPreferences.loadState(serverUrl: initialSyncConfig.serverUrl)
+        syncState = SyncPreferences.loadState(serverUrl: initialSyncConfig.serverUrl, defaults: syncDefaults)
     }
 
     convenience init() {
@@ -227,6 +231,8 @@ final class AppStore: ObservableObject {
         source.createdAt = Date.isoNow
         source.updatedAt = Date.isoNow
         source.nodes = rekey(source.nodes)
+        source.markdownSource = nil
+        source.markdownUpdatedAt = nil
         workspace.documents.insert(source, at: 0)
         workspace.activeDocumentId = source.id
         activeNodeId = TreeOperations.firstNodeId(source.nodes)
@@ -783,9 +789,9 @@ final class AppStore: ObservableObject {
             show(message)
             return false
         }
-        SyncPreferences.saveConfig(normalized)
+        SyncPreferences.saveConfig(normalized, defaults: syncDefaults)
         syncConfig = normalized
-        syncState = SyncPreferences.loadState(serverUrl: normalized.serverUrl)
+        syncState = SyncPreferences.loadState(serverUrl: normalized.serverUrl, defaults: syncDefaults)
         restartAutoSyncIfNeeded()
         if closesDialog {
             showSyncConfigDialog = false
@@ -794,7 +800,7 @@ final class AppStore: ObservableObject {
         return true
     }
 
-    private func runSync(_ mode: WorkspaceSyncMode, automatic: Bool = false) async {
+    func runSync(_ mode: WorkspaceSyncMode, automatic: Bool = false) async {
         guard isWorkspaceReady else {
             show("工作区尚未载入，无法同步")
             return
@@ -808,20 +814,31 @@ final class AppStore: ObservableObject {
         }
 
         isSyncing = true
+        defer { isSyncing = false }
+        let currentWorkspace = workspace
         if !automatic {
             show(syncStartingMessage(for: mode))
         }
         saveTask?.cancel()
         do {
-            try repository.saveWorkspace(workspace)
-            let service = SyncService(config: normalizedConfig)
+            try repository.saveWorkspace(currentWorkspace)
+            let service = SyncService(config: normalizedConfig, session: syncSession)
             let currentState = syncState.serverUrl == normalizedConfig.serverUrl
                 ? syncState
                 : .empty(serverUrl: normalizedConfig.serverUrl)
 
             switch mode {
             case .merge:
-                let result = try await service.syncWorkspace(workspace, previousState: currentState)
+                let result = try await service.syncWorkspace(
+                    currentWorkspace,
+                    previousState: currentState,
+                    onCheckpoint: { [weak self] state in self?.persistSyncState(state) }
+                )
+                guard workspace == currentWorkspace else {
+                    show("同步期间工作区有变化，已保留本机内容，请稍后再次同步")
+                    scheduleAutoSyncAfterLocalChange()
+                    return
+                }
                 if result.workspace != workspace {
                     try replaceWorkspaceFromSync(result.workspace, snapshotReason: "before-web-sync")
                 }
@@ -830,24 +847,30 @@ final class AppStore: ObservableObject {
                     show(syncCompletionMessage(result.summary))
                 }
             case .push:
-                let result = try await service.pushWorkspace(workspace)
+                let result = try await service.pushWorkspace(
+                    currentWorkspace,
+                    onCheckpoint: { [weak self] state in self?.persistSyncState(state) }
+                )
                 persistSyncState(result.state)
                 show(syncCompletionMessage(result.summary))
             case .pull:
                 let result = try await service.pullWorkspace()
-                persistSyncState(result.state)
                 guard let remoteWorkspace = result.workspace else {
                     show("远端还没有可同步的文档")
-                    isSyncing = false
+                    return
+                }
+                guard workspace == currentWorkspace else {
+                    show("拉取期间工作区有变化，已保留本机内容，未替换工作区")
+                    scheduleAutoSyncAfterLocalChange()
                     return
                 }
                 try replaceWorkspaceFromSync(remoteWorkspace, snapshotReason: "before-web-sync-pull")
+                persistSyncState(result.state)
                 show("已从 Web 同步 \(remoteWorkspace.documents.count) 篇文档")
             }
         } catch {
             show(automatic ? "后台同步失败：\(error.localizedDescription)" : "同步失败：\(error.localizedDescription)")
         }
-        isSyncing = false
     }
 
     private func restartAutoSyncIfNeeded() {
@@ -875,17 +898,18 @@ final class AppStore: ObservableObject {
 
     private func persistSyncState(_ state: SyncState) {
         syncState = state
-        SyncPreferences.saveState(state)
+        SyncPreferences.saveState(state, defaults: syncDefaults)
     }
 
     private func replaceWorkspaceFromSync(_ next: WorkspaceV1DTO, snapshotReason: String) throws {
         try repository.createSnapshot(reason: snapshotReason, workspace: workspace)
+        let normalized = TreeOperations.normalizeWorkspace(next)
+        try repository.saveWorkspace(normalized)
         recordUndoSnapshot()
-        workspace = TreeOperations.normalizeWorkspace(next)
+        workspace = normalized
         activeNodeId = TreeOperations.firstNodeId(activeDocument?.nodes ?? [])
         focusNodeId = nil
         finishCoalescedUndo()
-        try repository.saveWorkspace(workspace)
     }
 
     private func syncStartingMessage(for mode: WorkspaceSyncMode) -> String {

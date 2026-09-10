@@ -33,6 +33,8 @@ This workspace currently uses SwiftPM. `scripts/build_and_run.sh` builds a nativ
 
 ## Web Sync
 
+1.4.3 fixes interrupted-sync retry checkpoints and commits downloaded revisions only after the workspace is saved. It preserves mobile shortcut flags and extension fields through sync and Markdown sidecar storage. Content changes clear stale Markdown; view-only changes keep the original source. The native client continues to guard editing during sync and checks for workspace changes before applying network results.
+
 After deploying Bike Sync Server, open Web Sync from the sidebar gear, Settings, or the Bike menu. Enter the deployed sync service URL and the device sync key configured in `config/bike-sync.config.json`.
 
 - `保存并同步` runs document-level bidirectional sync.
@@ -55,7 +57,7 @@ Useful variants:
 ```bash
 ./scripts/build_and_run.sh --verify
 ./scripts/build_and_run.sh --logs
-VERSION=1.4.2 ./scripts/package_dmg.sh
+VERSION=1.4.3 ./scripts/package_dmg.sh
 CODE_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./scripts/package_dmg.sh
 ```
 

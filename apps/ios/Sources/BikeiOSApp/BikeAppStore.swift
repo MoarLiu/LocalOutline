@@ -280,6 +280,9 @@ final class BikeAppStore: ObservableObject {
             return
         }
         isSyncing = true
+        defer { isSyncing = false }
+        saveRequestId += 1
+        saveTask?.cancel()
         if !automatic { status = "正在同步 Web 文档..." }
         do {
             _ = try await repository.save(currentPayload)
@@ -289,9 +292,19 @@ final class BikeAppStore: ObservableObject {
                 : .empty(serverUrl: normalized.serverUrl)
             switch mode {
             case .merge:
-                let result = try await service.syncWorkspace(currentPayload.workspace, previousState: currentState)
+                let result = try await service.syncWorkspace(
+                    currentPayload.workspace,
+                    previousState: currentState,
+                    onCheckpoint: { [weak self] state in self?.persistSyncState(state) }
+                )
+                guard payload == currentPayload else {
+                    status = "同步期间有新编辑，已保留本机内容，请稍后再次同步"
+                    scheduleAutoSyncAfterLocalChange()
+                    return
+                }
                 let nextPayload = try WorkspaceJSON.payload(for: result.workspace)
-                payload = try await repository.save(nextPayload)
+                payload = nextPayload
+                _ = try await repository.save(nextPayload)
                 persistSyncState(result.state)
                 if !automatic || result.summary.hasVisibleChange {
                     status = syncMessage(result.summary)
@@ -302,20 +315,24 @@ final class BikeAppStore: ObservableObject {
                 status = syncMessage(result.summary)
             case .pull:
                 let result = try await service.pullWorkspace()
-                persistSyncState(result.state)
                 guard let workspace = result.workspace else {
                     status = "远端还没有可同步的文档"
-                    isSyncing = false
+                    return
+                }
+                guard payload == currentPayload else {
+                    status = "拉取期间有新编辑，已保留本机内容，未替换工作区"
+                    scheduleAutoSyncAfterLocalChange()
                     return
                 }
                 let nextPayload = try WorkspaceJSON.payload(for: workspace)
-                payload = try await repository.save(nextPayload)
+                payload = nextPayload
+                _ = try await repository.save(nextPayload)
+                persistSyncState(result.state)
                 status = "已从 Web 同步 \(workspace.documents.count) 篇文档"
             }
         } catch {
             status = automatic ? "后台同步失败：\(error.localizedDescription)" : "同步失败：\(error.localizedDescription)"
         }
-        isSyncing = false
     }
 
     private func persistSyncState(_ state: SyncState) {

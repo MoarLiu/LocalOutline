@@ -30,6 +30,7 @@ export interface OutlineDocument {
   updatedAt: string;
   markdownSource?: string;
   markdownUpdatedAt?: string;
+  isShortcut?: boolean;
   nodes: OutlineNode[];
 }
 

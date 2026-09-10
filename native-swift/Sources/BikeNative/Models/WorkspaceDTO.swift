@@ -69,11 +69,32 @@ struct WorkspaceV1DTO: Codable, Equatable, Sendable {
     var version: Int
     var activeDocumentId: String
     var documents: [OutlineDocumentDTO]
+    var additionalFields: [String: JSONValue]
 
-    init(version: Int = 1, activeDocumentId: String, documents: [OutlineDocumentDTO]) {
+    init(version: Int = 1, activeDocumentId: String, documents: [OutlineDocumentDTO], additionalFields: [String: JSONValue] = [:]) {
         self.version = version
         self.activeDocumentId = activeDocumentId
         self.documents = documents
+        self.additionalFields = additionalFields
+    }
+    enum CodingKeys: String, CodingKey, CaseIterable {
+        case version, activeDocumentId, documents
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decode(Int.self, forKey: .version)
+        activeDocumentId = try container.decode(String.self, forKey: .activeDocumentId)
+        documents = try container.decode([OutlineDocumentDTO].self, forKey: .documents)
+        additionalFields = try decoder.additionalFields(excluding: CodingKeys.self)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(version, forKey: .version)
+        try container.encode(activeDocumentId, forKey: .activeDocumentId)
+        try container.encode(documents, forKey: .documents)
+        try encoder.encodeAdditionalFields(additionalFields, excluding: CodingKeys.self)
     }
 }
 
@@ -85,6 +106,8 @@ struct OutlineDocumentDTO: Codable, Equatable, Identifiable, Sendable {
     var markdownSource: String?
     var markdownUpdatedAt: String?
     var nodes: [OutlineNodeDTO]
+    var isShortcut: Bool?
+    var additionalFields: [String: JSONValue]
 
     init(
         id: String = UUID().uuidString,
@@ -93,7 +116,9 @@ struct OutlineDocumentDTO: Codable, Equatable, Identifiable, Sendable {
         updatedAt: String = Date.isoNow,
         markdownSource: String? = nil,
         markdownUpdatedAt: String? = nil,
-        nodes: [OutlineNodeDTO] = [OutlineNodeDTO(text: Defaults.nodeText)]
+        nodes: [OutlineNodeDTO] = [OutlineNodeDTO(text: Defaults.nodeText)],
+        isShortcut: Bool? = nil,
+        additionalFields: [String: JSONValue] = [:]
     ) {
         self.id = id
         self.title = title
@@ -102,6 +127,37 @@ struct OutlineDocumentDTO: Codable, Equatable, Identifiable, Sendable {
         self.markdownSource = markdownSource
         self.markdownUpdatedAt = markdownUpdatedAt
         self.nodes = nodes
+        self.isShortcut = isShortcut
+        self.additionalFields = additionalFields
+    }
+    enum CodingKeys: String, CodingKey, CaseIterable {
+        case id, title, createdAt, updatedAt, markdownSource, markdownUpdatedAt, nodes, isShortcut
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        title = try container.decode(String.self, forKey: .title)
+        createdAt = try container.decode(String.self, forKey: .createdAt)
+        updatedAt = try container.decode(String.self, forKey: .updatedAt)
+        markdownSource = try container.decodeIfPresent(String.self, forKey: .markdownSource)
+        markdownUpdatedAt = try container.decodeIfPresent(String.self, forKey: .markdownUpdatedAt)
+        nodes = try container.decode([OutlineNodeDTO].self, forKey: .nodes)
+        isShortcut = try container.decodeIfPresent(Bool.self, forKey: .isShortcut)
+        additionalFields = try decoder.additionalFields(excluding: CodingKeys.self)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(title, forKey: .title)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(updatedAt, forKey: .updatedAt)
+        try container.encodeIfPresent(markdownSource, forKey: .markdownSource)
+        try container.encodeIfPresent(markdownUpdatedAt, forKey: .markdownUpdatedAt)
+        try container.encode(nodes, forKey: .nodes)
+        try container.encodeIfPresent(isShortcut, forKey: .isShortcut)
+        try encoder.encodeAdditionalFields(additionalFields, excluding: CodingKeys.self)
     }
 }
 
@@ -126,6 +182,7 @@ struct OutlineNodeDTO: Codable, Equatable, Identifiable, Hashable, Sendable {
     var codeLanguage: String?
     var isTodo: Bool?
     var children: [OutlineNodeDTO]
+    var additionalFields: [String: JSONValue]
 
     init(
         id: String = "node_\(UUID().uuidString)",
@@ -147,7 +204,8 @@ struct OutlineNodeDTO: Codable, Equatable, Identifiable, Hashable, Sendable {
         codeBlock: String? = nil,
         codeLanguage: String? = nil,
         isTodo: Bool? = nil,
-        children: [OutlineNodeDTO] = []
+        children: [OutlineNodeDTO] = [],
+        additionalFields: [String: JSONValue] = [:]
     ) {
         self.id = id
         self.text = text
@@ -169,9 +227,10 @@ struct OutlineNodeDTO: Codable, Equatable, Identifiable, Hashable, Sendable {
         self.codeLanguage = Self.normalizeCodeLanguage(codeLanguage)
         self.isTodo = isTodo
         self.children = children
+        self.additionalFields = additionalFields
     }
 
-    enum CodingKeys: String, CodingKey {
+    enum CodingKeys: String, CodingKey, CaseIterable {
         case id, text, note, checked, collapsed, color, headingLevel
         case bold, italic, underline, strike, highlight, icon, imageName, imageAlt, table, codeBlock, codeLanguage, isTodo, children
     }
@@ -199,6 +258,33 @@ struct OutlineNodeDTO: Codable, Equatable, Identifiable, Hashable, Sendable {
         codeLanguage = Self.normalizeCodeLanguage(try container.decodeIfPresent(String.self, forKey: .codeLanguage))
         isTodo = try container.decodeIfPresent(Bool.self, forKey: .isTodo)
         children = try container.decodeIfPresent([OutlineNodeDTO].self, forKey: .children) ?? []
+        additionalFields = try decoder.additionalFields(excluding: CodingKeys.self)
+    }
+
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(text, forKey: .text)
+        try container.encode(note, forKey: .note)
+        try container.encode(checked, forKey: .checked)
+        try container.encode(collapsed, forKey: .collapsed)
+        try container.encode(color, forKey: .color)
+        try container.encodeIfPresent(headingLevel, forKey: .headingLevel)
+        try container.encodeIfPresent(bold, forKey: .bold)
+        try container.encodeIfPresent(italic, forKey: .italic)
+        try container.encodeIfPresent(underline, forKey: .underline)
+        try container.encodeIfPresent(strike, forKey: .strike)
+        try container.encodeIfPresent(highlight, forKey: .highlight)
+        try container.encodeIfPresent(icon, forKey: .icon)
+        try container.encodeIfPresent(imageName, forKey: .imageName)
+        try container.encodeIfPresent(imageAlt, forKey: .imageAlt)
+        try container.encodeIfPresent(table, forKey: .table)
+        try container.encodeIfPresent(codeBlock, forKey: .codeBlock)
+        try container.encodeIfPresent(codeLanguage, forKey: .codeLanguage)
+        try container.encodeIfPresent(isTodo, forKey: .isTodo)
+        try container.encode(children, forKey: .children)
+        try encoder.encodeAdditionalFields(additionalFields, excluding: CodingKeys.self)
     }
 
     private static func normalizeCodeBlock(_ value: String?) -> String? {

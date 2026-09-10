@@ -189,10 +189,13 @@ public struct SyncService {
 
     public func syncWorkspace(
         _ workspace: Workspace,
-        previousState: SyncState
+        previousState: SyncState,
+        onCheckpoint: (@MainActor @Sendable (SyncState) -> Void)? = nil
     ) async throws -> (workspace: Workspace, state: SyncState, summary: SyncSummary) {
         var state = previousState
         state.serverUrl = config.serverUrl
+        // Keep unapplied downloads out of the durable sync baseline.
+        var checkpointState = state
         var summary = SyncSummary()
         let manifest = try await fetchManifest()
         let remoteById = Dictionary(uniqueKeysWithValues: manifest.documents.map { ($0.id, $0) })
@@ -230,6 +233,8 @@ public struct SyncService {
                     if knownRevision == remote.revision {
                         let deleted = try await deleteDocument(id: remote.id, expectedRevision: remote.revision)
                         recordDeletedState(&state, id: remote.id, revision: deleted.revision)
+                        recordDeletedState(&checkpointState, id: remote.id, revision: deleted.revision)
+                        await onCheckpoint?(checkpointState)
                         summary.deleted += 1
                     } else {
                         summary.conflicts.append("\(remote.title)：本机已删除，但远端有更新")
@@ -258,6 +263,8 @@ public struct SyncService {
                     let uploaded = try await putDocument(local, expectedRevision: knownRevision)
                     documents = documents.map { $0.id == uploaded.document.id ? uploaded.document : $0 }
                     try recordDocumentState(&state, document: uploaded.document, revision: uploaded.revision)
+                    try recordDocumentState(&checkpointState, document: uploaded.document, revision: uploaded.revision)
+                    await onCheckpoint?(checkpointState)
                     summary.uploaded += 1
                 } else {
                     try recordDocumentState(&state, document: local, revision: remote.revision)
@@ -279,6 +286,8 @@ public struct SyncService {
             let uploaded = try await putDocument(local, expectedRevision: nil)
             documents = documents.map { $0.id == uploaded.document.id ? uploaded.document : $0 }
             try recordDocumentState(&state, document: uploaded.document, revision: uploaded.revision)
+            try recordDocumentState(&checkpointState, document: uploaded.document, revision: uploaded.revision)
+            await onCheckpoint?(checkpointState)
             summary.uploaded += 1
         }
 

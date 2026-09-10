@@ -28,7 +28,9 @@ enum MarkdownCodec {
             updatedAt: now,
             markdownSource: normalizeSource(source),
             markdownUpdatedAt: now,
-            nodes: parsed.nodes.isEmpty ? [OutlineNodeDTO(text: Defaults.nodeText)] : parsed.nodes
+            nodes: parsed.nodes.isEmpty ? [OutlineNodeDTO(text: Defaults.nodeText)] : parsed.nodes,
+            isShortcut: previousDocument?.isShortcut,
+            additionalFields: previousDocument?.additionalFields ?? [:]
         )
     }
 

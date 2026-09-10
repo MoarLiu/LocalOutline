@@ -20,6 +20,7 @@ let package = Package(
                 "Resources/BikeNative.entitlements",
                 "Resources/AppIcon.icns"
             ]
-        )
+        ),
+        .testTarget(name: "BikeNativeTests", dependencies: ["BikeNative"], path: "Tests/BikeNativeTests", exclude: ["Fixtures"])
     ]
 )

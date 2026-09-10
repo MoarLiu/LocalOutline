@@ -41,7 +41,7 @@ curl -fsSL https://raw.githubusercontent.com/MoarLiu/Bike/main/scripts/install.s
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/MoarLiu/Bike/main/scripts/install.sh \
-  | BIKE_VERSION=v1.4.2 BIKE_INSTALL_DIR=/opt/bike-sync-server bash -s -- install-sync
+  | BIKE_VERSION=v1.4.3 BIKE_INSTALL_DIR=/opt/bike-sync-server bash -s -- install-sync
 ```
 
 已经 clone 仓库时，也可以在项目目录里运行：

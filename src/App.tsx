@@ -580,6 +580,7 @@ function App() {
   });
   const [showSyncConfig, setShowSyncConfig] = useState(false);
   const [syncBusy, setSyncBusy] = useState(false);
+  const syncBusyRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const inputRefs = useRef(new Map<string, HTMLTextAreaElement>());
   const workspaceRef = useRef<Workspace | null>(null);
@@ -1779,7 +1780,7 @@ function App() {
     overrideConfig?: SyncConfig,
     options: { silent?: boolean } = {},
   ) => {
-    if (syncBusy) return;
+    if (syncBusyRef.current) return;
     const currentWorkspace = flushPendingEdits() ?? workspaceRef.current;
     if (!currentWorkspace) return;
     const activeSync = overrideConfig
@@ -1789,19 +1790,30 @@ function App() {
       if (!options.silent) showNotice("Electron 同步需要设备密钥。");
       return;
     }
+    syncBusyRef.current = true;
     setSyncBusy(true);
+    let retryAfterEdit = false;
     if (!options.silent) showNotice("正在同步文档...");
     try {
+      const initialSave = await saveWorkspace(currentWorkspace);
+      if (!initialSave.ok) throw initialSave.error;
       const result = await syncWorkspaceWithRemote(
         currentWorkspace,
         activeSync.config,
         activeSync.state,
         { onCheckpoint: persistSyncState },
       );
+      if ((flushPendingEdits() ?? workspaceRef.current) !== currentWorkspace) {
+        retryAfterEdit = true;
+        showNotice("同步期间有新编辑，已保留本机内容，请稍后再次同步");
+        return;
+      }
       applySyncedWorkspace(result.workspace);
+      const saved = await saveWorkspace(result.workspace);
+      if (!saved.ok) throw saved.error;
       persistSyncState(result.state);
-      await saveWorkspace(result.workspace);
-      autoSyncDirtyRef.current = false;
+      retryAfterEdit = workspaceRef.current !== result.workspace;
+      autoSyncDirtyRef.current = retryAfterEdit;
       const changed =
         result.summary.uploaded > 0 ||
         result.summary.downloaded > 0 ||
@@ -1811,13 +1823,15 @@ function App() {
     } catch (error) {
       showNotice(options.silent ? `后台同步失败：${syncErrorMessage(error)}` : syncErrorMessage(error));
     } finally {
+      syncBusyRef.current = false;
       setSyncBusy(false);
+      if (retryAfterEdit) scheduleAutoSync();
     }
   });
 
   const canAutoSync = useEventCallback(() => (
     ready &&
-    !syncBusy &&
+    !syncBusyRef.current &&
     syncConfig.autoSync &&
     (!usesDesktopSyncProxy() || Boolean(syncConfig.token.trim())) &&
     Boolean(normalizeSyncServerUrl(syncConfig.serverUrl))
@@ -1856,7 +1870,7 @@ function App() {
   ]);
 
   const pushLocalWorkspace = useEventCallback(async (overrideConfig?: SyncConfig) => {
-    if (syncBusy) return;
+    if (syncBusyRef.current) return;
     const currentWorkspace = flushPendingEdits() ?? workspaceRef.current;
     if (!currentWorkspace) return;
     const confirmed = window.confirm(
@@ -1873,9 +1887,12 @@ function App() {
       showNotice("Electron 上传需要设备密钥。");
       return;
     }
+    syncBusyRef.current = true;
     setSyncBusy(true);
     showNotice("正在上传本机文档...");
     try {
+      const initialSave = await saveWorkspace(currentWorkspace);
+      if (!initialSave.ok) throw initialSave.error;
       const result = await pushWorkspaceToRemote(currentWorkspace, activeSync.config, {
         onCheckpoint: persistSyncState,
       });
@@ -1884,12 +1901,13 @@ function App() {
     } catch (error) {
       showNotice(syncErrorMessage(error));
     } finally {
+      syncBusyRef.current = false;
       setSyncBusy(false);
     }
   });
 
   const pullRemoteWorkspace = useEventCallback(async (overrideConfig?: SyncConfig) => {
-    if (syncBusy) return;
+    if (syncBusyRef.current) return;
     const currentWorkspace = flushPendingEdits() ?? workspaceRef.current;
     const confirmed = window.confirm(
       "从服务端拉取会替换当前本机工作区。继续前会先下载一份本机备份。",
@@ -1914,21 +1932,28 @@ function App() {
       showNotice("Electron 拉取需要设备密钥。");
       return;
     }
+    syncBusyRef.current = true;
     setSyncBusy(true);
     showNotice("正在从服务端拉取...");
     try {
       const result = await pullWorkspaceFromRemote(activeSync.config);
-      persistSyncState(result.state);
       if (!result.workspace) {
         showNotice("服务端暂无文档");
         return;
       }
+      if ((flushPendingEdits() ?? workspaceRef.current) !== currentWorkspace) {
+        showNotice("拉取期间有新编辑，已保留本机内容，未替换工作区");
+        return;
+      }
       applySyncedWorkspace(result.workspace);
-      await saveWorkspace(result.workspace);
+      const saved = await saveWorkspace(result.workspace);
+      if (!saved.ok) throw saved.error;
+      persistSyncState(result.state);
       showNotice(`已从服务端拉取 ${result.workspace.documents.length} 个文档`);
     } catch (error) {
       showNotice(syncErrorMessage(error));
     } finally {
+      syncBusyRef.current = false;
       setSyncBusy(false);
     }
   });

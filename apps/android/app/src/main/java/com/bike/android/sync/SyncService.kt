@@ -144,9 +144,12 @@ class SyncService(
     suspend fun syncWorkspace(
         workspace: Workspace,
         previousState: SyncState,
+        onCheckpoint: suspend (SyncState) -> Unit = {},
     ): SyncResult =
         withContext(Dispatchers.IO) {
             var state = previousState.copy(serverUrl = config.normalized.serverUrl)
+            // Keep unapplied downloads out of the durable sync baseline.
+            var checkpointState = state
             var summary = SyncSummary()
             val manifest = fetchManifest()
             val remoteById = manifest.documents.associateBy { it.id }
@@ -181,6 +184,8 @@ class SyncService(
                         if (knownRevision == remote.revision) {
                             val deleted = deleteDocument(remote.id, remote.revision)
                             state = state.recordDeleted(remote.id, deleted.revision)
+                            checkpointState = checkpointState.recordDeleted(remote.id, deleted.revision)
+                            onCheckpoint(checkpointState)
                             summary = summary.copy(deleted = summary.deleted + 1)
                         } else {
                             summary = summary.copy(conflicts = summary.conflicts + "${remote.title}：本机已删除，但远端有更新")
@@ -209,6 +214,8 @@ class SyncService(
                         val uploaded = putDocument(local, knownRevision)
                         documents = documents.map { if (it.id == uploaded.document.id) uploaded.document else it }
                         state = state.recordDocument(uploaded.document, uploaded.revision)
+                        checkpointState = checkpointState.recordDocument(uploaded.document, uploaded.revision)
+                        onCheckpoint(checkpointState)
                         summary = summary.copy(uploaded = summary.uploaded + 1)
                     } else {
                         state = state.recordDocument(local, remote.revision)
@@ -231,6 +238,8 @@ class SyncService(
                     val uploaded = putDocument(local, null)
                     documents = documents.map { if (it.id == uploaded.document.id) uploaded.document else it }
                     state = state.recordDocument(uploaded.document, uploaded.revision)
+                    checkpointState = checkpointState.recordDocument(uploaded.document, uploaded.revision)
+                    onCheckpoint(checkpointState)
                     summary = summary.copy(uploaded = summary.uploaded + 1)
                 }
             }

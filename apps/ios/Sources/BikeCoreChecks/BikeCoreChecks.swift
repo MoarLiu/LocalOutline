@@ -10,6 +10,7 @@ struct BikeCoreChecks {
         checks.run("starter workspace uses Bike IDs and inbox document", checkStarterWorkspace)
         checks.run("document actions keep active document valid", checkDocumentActions)
         checks.run("node text, note, and structure mutations", checkNodeMutations)
+        checks.run("content edits invalidate Markdown while view changes preserve it", checkMarkdownInvalidation)
         checks.run("outdent and delete nested node", checkOutdentAndDelete)
         checks.run("deleting all documents creates replacement", checkDeletingAllDocuments)
         checks.run("decode desktop workspace with rich node fields", checkDecodeRichWorkspace)
@@ -22,6 +23,7 @@ struct BikeCoreChecks {
         await checks.run("repository loadOrCreate creates starter file", checkRepositoryLoadOrCreate)
         await checks.run("repository backs up corrupted workspace", checkCorruptedWorkspaceBackup)
         await checks.run("repository replace and export JSON", checkRepositoryReplaceAndExport)
+        await checks.run("sync retry checkpoints only committed remote writes", checkSyncCheckpoints)
         checks.run("AI parses fenced and balanced JSON", checkAIJSONParsing)
         checks.run("AI extracts Responses and Chat Completions text", checkAITextExtraction)
         checks.run("AI extracts event stream deltas", checkAIEventStreamExtraction)
@@ -70,6 +72,39 @@ private struct CheckSuite {
 
 private struct CheckFailure: Error, CustomStringConvertible {
     var description: String
+}
+
+private func checkMarkdownInvalidation() throws {
+    let document = OutlineDocument(
+        id: "markdown-doc", title: inboxDocumentTitle,
+        markdownSource: "# Original\n\n- Original", markdownUpdatedAt: "2026-09-01T00:00:00.000Z",
+        nodes: [OutlineNode(id: "markdown-node", text: "Original", children: [OutlineNode(id: "child", text: "Child")])]
+    )
+    let workspace = Workspace(activeDocumentId: document.id, documents: [document])
+    let contentEdits = [
+        workspace.withNodeText(documentId: document.id, nodeId: "markdown-node", text: "Edited"),
+        workspace.withNodeTextAndNote(documentId: document.id, nodeId: "markdown-node", text: "Original", note: "Note"),
+        workspace.withNodeChecked(documentId: document.id, nodeId: "markdown-node", checked: true),
+        workspace.withChildNode(documentId: document.id, nodeId: "markdown-node", childNode: outlineNode("New")),
+        workspace.withNodeMovedToParentLevel(documentId: document.id, nodeId: "child"),
+        workspace.withNodeDeleted(documentId: document.id, nodeId: "child"),
+        workspace.withDocumentTitle(documentId: document.id, title: "Renamed"),
+        workspace.withInboxEntry("New inbox entry"),
+        workspace.withDocumentDuplicated(documentId: document.id)
+    ]
+    for edited in contentEdits {
+        let active = try edited.activeDocument()
+        try expect(active.markdownSource == nil, "content edits must clear the cached Markdown")
+        try expect(active.markdownUpdatedAt == nil, "content edits must clear the Markdown timestamp")
+    }
+    let viewEdits = [
+        workspace.withNodeCollapsed(documentId: document.id, nodeId: "markdown-node", collapsed: true),
+        workspace.withDocumentShortcut(documentId: document.id, isShortcut: true),
+        workspace.withNodeText(documentId: document.id, nodeId: "markdown-node", text: "Original")
+    ]
+    for edited in viewEdits {
+        try expect(edited.documents[0].markdownSource == document.markdownSource, "view-only and no-op edits must preserve source formatting")
+    }
 }
 
 private func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {

@@ -488,6 +488,8 @@ export const syncWorkspaceWithRemote = async (
     documentFingerprints: { ...previousState.documentFingerprints },
     deletedDocumentRevisions: { ...previousState.deletedDocumentRevisions },
   };
+  // Downloads are not durable until the caller saves the returned workspace.
+  const checkpointState = cloneSyncState(state);
   const summary: SyncSummary = { uploaded: 0, downloaded: 0, deleted: 0, conflicts: [] };
   const manifest = await fetchSyncManifest(normalizedConfig);
   const remoteById = new Map(manifest.documents.map((document) => [document.id, document]));
@@ -526,7 +528,8 @@ export const syncWorkspaceWithRemote = async (
         if (knownRevision === remote.revision) {
           const deleted = await deleteRemoteDocument(normalizedConfig, remote.id, remote.revision);
           recordDeletedState(state, remote.id, deleted.revision);
-          checkpointSyncState(state, options);
+          recordDeletedState(checkpointState, remote.id, deleted.revision);
+          checkpointSyncState(checkpointState, options);
           summary.deleted += 1;
         } else {
           summary.conflicts.push(`${remote.title}：本机已删除，但远端有更新`);
@@ -557,7 +560,8 @@ export const syncWorkspaceWithRemote = async (
           document.id === uploaded.document.id ? uploaded.document : document,
         );
         recordDocumentState(state, uploaded.document, uploaded.revision);
-        checkpointSyncState(state, options);
+        recordDocumentState(checkpointState, uploaded.document, uploaded.revision);
+        checkpointSyncState(checkpointState, options);
         summary.uploaded += 1;
       } else {
         recordDocumentState(state, local, remote.revision);
@@ -585,7 +589,8 @@ export const syncWorkspaceWithRemote = async (
       document.id === uploaded.document.id ? uploaded.document : document,
     );
     recordDocumentState(state, uploaded.document, uploaded.revision);
-    checkpointSyncState(state, options);
+    recordDocumentState(checkpointState, uploaded.document, uploaded.revision);
+    checkpointSyncState(checkpointState, options);
     summary.uploaded += 1;
   }
 
@@ -599,6 +604,7 @@ export const syncWorkspaceWithRemote = async (
     ? workspace.activeDocumentId
     : ordered[0]?.id ?? workspace.activeDocumentId;
   const nextWorkspace: Workspace = {
+    ...workspace,
     version: 1,
     activeDocumentId,
     documents: ordered,

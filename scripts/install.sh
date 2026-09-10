@@ -77,7 +77,7 @@ Bike 部署管理脚本
   menu          打开管理菜单
 
 环境变量：
-  BIKE_VERSION=v1.4.2                 安装指定版本；默认 latest
+  BIKE_VERSION=v1.4.3                 安装指定版本；默认 latest
   BIKE_INSTALL_DIR=/opt/bike
   BIKE_WEB_SERVICE_NAME=bike-web
   BIKE_WEB_SERVICE_USER=bike-web
@@ -543,7 +543,7 @@ install_web_service() {
   data_dir="${INSTALL_DIR}/data"
 
   sudo_cmd mkdir -p "${data_dir}"
-  sudo_cmd chown -R "${service_user}:${service_group}" "${data_dir}"
+  # Preserve Sync Server ownership of the shared database directory and files.
   sudo_cmd chown "${service_user}:${service_group}" "${config_path}" || true
 
   tmp_file="$(mktemp)"

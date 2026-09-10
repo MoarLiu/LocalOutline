@@ -4,7 +4,7 @@ import { createNode, normalizeColor, uid } from "./tree";
 export const CURRENT_WORKSPACE_VERSION = 1;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null;
+  typeof value === "object" && value !== null && !Array.isArray(value);
 
 const textOr = (value: unknown, fallback: string) =>
   typeof value === "string" ? value : fallback;
@@ -40,6 +40,7 @@ const normalizeNode = (
   }
 
   const node: OutlineNode = {
+    ...rawNode,
     ...createNode(textOr(rawNode.text, fallbackText)),
     id: uniqueId(rawNode.id, usedIds),
     note: textOr(rawNode.note, ""),
@@ -101,12 +102,14 @@ export const migrateDocument = (
     : [];
 
   return {
+    ...rawDocument,
     id: uniqueId(rawDocument.id, usedIds),
     title: textOr(rawDocument.title, "").trim() || "未命名文档",
     createdAt: textOr(rawDocument.createdAt, now),
     updatedAt,
-    ...(markdownSource !== undefined ? { markdownSource } : {}),
-    ...(markdownUpdatedAt !== undefined ? { markdownUpdatedAt } : {}),
+    markdownSource,
+    markdownUpdatedAt,
+    isShortcut: typeof rawDocument.isShortcut === "boolean" ? rawDocument.isShortcut : undefined,
     nodes: nodes.length ? nodes : [normalizeNode(null, usedIds)],
   };
 };
@@ -134,6 +137,7 @@ export const migrateWorkspace = (rawWorkspace: unknown): Workspace => {
     : documents[0].id;
 
   return {
+    ...rawWorkspace,
     version: CURRENT_WORKSPACE_VERSION,
     activeDocumentId,
     documents,

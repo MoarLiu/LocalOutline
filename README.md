@@ -6,14 +6,25 @@ Bike 是一个本地优先的大纲、思维导图和 Markdown 写作工具。�
 
 | 平台 | 版本 | 状态 | 位置 |
 | --- | --- | --- | --- |
-| Web / Electron Desktop | `1.4.2` | 当前桌面主线 | 根目录 |
-| macOS Swift Native | `1.4.1` | 原生 macOS 客户端 | `native-swift/` |
+| Web / Electron Desktop | `1.4.3` | 当前桌面主线 | 根目录 |
+| macOS Swift Native | `1.4.3` | 原生 macOS 客户端 | `native-swift/` |
 | Android Companion | `0.1.14-web-sync` | Mobile beta | `apps/android/` |
 | iOS Companion | `0.1.14` | Mobile beta | `apps/ios/` |
 
 桌面端是完整 Bike 体验；移动端是 companion client，优先服务手机上的快速捕捉、阅读、轻量编辑、AI 生成/润色和 Web Sync，不追求与桌面端完全功能一致。
 
-## 1.4.2 重点
+## 1.4.3 重点
+
+- 修复同步中断后的重试可能误删远端文档的问题：下载结果保存到本机后，才提交对应同步基线。
+- 同步期间的新编辑会保留在本机；开启自动同步时会安排再次同步，同一篇文档的并发修改仍会报告冲突。
+- 桌面同步保留移动端快捷标记和未知扩展字段。
+- macOS Swift Native 补齐同步故障恢复、拉取保存顺序和字段保留，复制 Markdown 文档时正确使用新标题。
+- 移动端源码修复了旧 Markdown 缓存和同步覆盖新编辑的问题；本次主线发布不包含新的移动端安装包。
+- 统一安装菜单支持 Web 与 Sync Server 的安装、更新和管理，Web 安装不再修改已有 Sync 数据目录的归属。
+
+完整更新说明见 [Bike 1.4.3](docs/release-1.4.3.md)。本次发布 Electron 与 Swift Native 的 Apple Silicon DMG，以及 Web/Sync Server 部署包；移动端安装包沿用独立发布流程。
+
+## 同步服务与 AI
 
 Bike 1.4.2 把 Web Sync 从 Web 认证服务中拆成可单独部署的 Sync Server。Web 版默认只托管应用入口和静态资源，数据仍保存在浏览器 IndexedDB；需要多端同步时，可以额外部署同步服务，Electron、Swift Native、Android 和 iOS 填写同步服务地址与设备同步密钥后，可按文档 revision 双向同步，并支持后台自动同步。
 
@@ -303,7 +314,7 @@ curl -fsSL https://raw.githubusercontent.com/MoarLiu/Bike/main/scripts/install.s
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/MoarLiu/Bike/main/scripts/install.sh \
-  | BIKE_VERSION=v1.4.2 BIKE_INSTALL_DIR=/opt/bike-sync-server bash -s -- install-sync
+  | BIKE_VERSION=v1.4.3 BIKE_INSTALL_DIR=/opt/bike-sync-server bash -s -- install-sync
 ```
 
 已经 clone 仓库时，也可以在项目目录里运行：

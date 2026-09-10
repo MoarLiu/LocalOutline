@@ -15,7 +15,7 @@ public extension Workspace {
     }
 
     func withDocumentShortcut(documentId: String, isShortcut: Bool, now: Date = Date()) -> Workspace {
-        updateDocument(documentId, now: now) { document in
+        updateDocument(documentId, now: now, preserveMarkdown: true) { document in
             document.isShortcut = isShortcut
         }
     }
@@ -104,6 +104,8 @@ public extension Workspace {
             next.activeDocumentId = next.documents[inboxIndex].id
             next.documents[inboxIndex].updatedAt = timestamp
             next.documents[inboxIndex].nodes.insert(node, at: 0)
+            next.documents[inboxIndex].markdownSource = nil
+            next.documents[inboxIndex].markdownUpdatedAt = nil
             return next
         }
 
@@ -146,7 +148,7 @@ public extension Workspace {
     }
 
     func withNodeCollapsed(documentId: String, nodeId: String, collapsed: Bool, now: Date = Date()) -> Workspace {
-        updateDocument(documentId, now: now) { document in
+        updateDocument(documentId, now: now, preserveMarkdown: true) { document in
             document.nodes = document.nodes.updateNode(nodeId) { node in
                 node.collapsed = collapsed
             }
@@ -210,12 +212,17 @@ public extension Workspace {
         return next
     }
 
-    private func updateDocument(_ documentId: String, now: Date, update: (inout OutlineDocument) -> Void) -> Workspace {
+    private func updateDocument(_ documentId: String, now: Date, preserveMarkdown: Bool = false, update: (inout OutlineDocument) -> Void) -> Workspace {
         var next = self
         guard let index = next.documents.firstIndex(where: { $0.id == documentId }) else {
             return self
         }
         update(&next.documents[index])
+        guard next.documents[index] != documents[index] else { return self }
+        if !preserveMarkdown {
+            next.documents[index].markdownSource = nil
+            next.documents[index].markdownUpdatedAt = nil
+        }
         next.documents[index].updatedAt = ISO8601DateFormatter.bike.string(from: now)
         return next
     }
@@ -229,8 +236,6 @@ public extension OutlineDocument {
             title: title.isEmpty ? "副本" : String("\(title) 副本".prefix(120)),
             createdAt: timestamp,
             updatedAt: timestamp,
-            markdownSource: markdownSource,
-            markdownUpdatedAt: markdownUpdatedAt,
             isShortcut: isShortcut,
             nodes: nodes.map { $0.duplicated() }
         )

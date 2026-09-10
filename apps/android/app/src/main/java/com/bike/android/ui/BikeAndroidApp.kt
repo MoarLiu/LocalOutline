@@ -125,9 +125,11 @@ import com.bike.android.sync.SyncSettingsRepository
 import com.bike.android.sync.SyncState
 import com.bike.android.sync.SyncSummary
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.jsonObject
 import java.net.SocketTimeoutException
@@ -208,8 +210,10 @@ fun BikeAndroidApp(
                 return
             }
             syncBusy = true
+            invalidatePendingSave()
             if (!automatic) status = "正在同步 Web 文档..."
             scope.launch {
+                var retryAfterEdit = false
                 runCatching {
                     repository.save(currentPayload)
                     val service = SyncService(normalized)
@@ -220,13 +224,20 @@ fun BikeAndroidApp(
                     }
                     when (mode) {
                         SyncMode.Merge -> {
-                            val result = service.syncWorkspace(currentPayload.workspace, currentState)
+                            val result = service.syncWorkspace(currentPayload.workspace, currentState) { checkpoint ->
+                                withContext(Dispatchers.Main) { persistSyncState(checkpoint) }
+                            }
+                            if (payload != currentPayload) {
+                                retryAfterEdit = true
+                                status = "同步期间有新编辑，已保留本机内容，请稍后再次同步"
+                                return@runCatching
+                            }
                             val nextPayload = WorkspacePayload(
                                 workspace = result.workspace,
                                 raw = WorkspaceJson.json.encodeToJsonElement(result.workspace).jsonObject,
                             )
-                            repository.save(nextPayload)
                             payload = nextPayload
+                            repository.save(nextPayload)
                             persistSyncState(result.state)
                             if (!automatic || result.summary.hasVisibleChange) {
                                 status = syncMessage(result.summary)
@@ -239,17 +250,22 @@ fun BikeAndroidApp(
                         }
                         SyncMode.Pull -> {
                             val result = service.pullWorkspace()
-                            persistSyncState(result.state)
                             val remoteWorkspace = result.workspace
                             if (remoteWorkspace == null) {
                                 status = "远端还没有可同步的文档"
                             } else {
+                                if (payload != currentPayload) {
+                                    retryAfterEdit = true
+                                    status = "拉取期间有新编辑，已保留本机内容，未替换工作区"
+                                    return@runCatching
+                                }
                                 val nextPayload = WorkspacePayload(
                                     workspace = remoteWorkspace,
                                     raw = WorkspaceJson.json.encodeToJsonElement(remoteWorkspace).jsonObject,
                                 )
-                                repository.save(nextPayload)
                                 payload = nextPayload
+                                repository.save(nextPayload)
+                                persistSyncState(result.state)
                                 status = "已从 Web 同步 ${remoteWorkspace.documents.size} 篇文档"
                             }
                         }
@@ -262,6 +278,12 @@ fun BikeAndroidApp(
                     }
                 }
                 syncBusy = false
+                if (retryAfterEdit && normalized.autoSync) {
+                    scope.launch {
+                        delay(5_000)
+                        runSync(SyncMode.Merge, automatic = true)
+                    }
+                }
             }
         }
 
